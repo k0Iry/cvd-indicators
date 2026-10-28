@@ -1,0 +1,27 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup show
+      - name: Build pinned public runner independently
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE=$(cargo metadata --locked --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "cvd-indicator-cvd") | .dependencies[] | select(.name == "cvd-indicator-sdk") | .source')
+          CORE_REV=$(printf '%s' "$SOURCE" | jq -Rr 'capture("rev=(?<rev>[0-9a-f]{40})").rev')
+          cargo install --locked --git https://github.com/k0Iry/cvd-core --rev "$CORE_REV" --root "$RUNNER_TEMP/core-tools" cvd-indicator-runner
+          printf 'CVD_INDICATOR_RUNNER=%s/core-tools/bin/cvd-indicator-runner\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'CVD_INDICATOR_RUNNER_SHA256=%s\n' "$(sha256sum "$RUNNER_TEMP/core-tools/bin/cvd-indicator-runner" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+      - name: Build libraries
+        run: cargo build --locked --release --workspace
+      - name: Public real-library conformance
+        run: cargo test --locked --release --workspace -- --test-threads=1

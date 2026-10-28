@@ -1,0 +1,14 @@
+[package]
+license.workspace = true
+rust-version.workspace = true
+name = "cvd-indicator-cvd"
+description = "CVD line: projects the host's established cumulative volume delta"
+version = "1.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cvd-indicator-sdk.workspace = true

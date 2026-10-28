@@ -1,0 +1,12 @@
+[package]
+license.workspace = true
+rust-version.workspace = true
+name = "cvd-indicators-conformance"
+description = "Output conformance + real runner integration tests for the public indicator libraries"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+cvd-indicator-sdk.workspace = true
+serde_json.workspace = true

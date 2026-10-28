@@ -1,0 +1,14 @@
+[package]
+license.workspace = true
+rust-version.workspace = true
+name = "cvd-indicator-flow"
+description = "Flow: per-bar Delta histogram and Buy/Sell taker quote turnover"
+version = "1.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cvd-indicator-sdk.workspace = true

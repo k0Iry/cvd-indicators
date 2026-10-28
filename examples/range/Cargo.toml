@@ -1,0 +1,14 @@
+[package]
+license.workspace = true
+rust-version.workspace = true
+name = "cvd-indicator-example-range"
+description = "Minimal third-party style example: rolling high/low midline and range width"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cvd-indicator-sdk.workspace = true
