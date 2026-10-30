@@ -1,29 +1,110 @@
 name: CI
-# Run local gates first; CI verifies pushes and pull requests.
+# Local gate first (scripts/public-gate.sh). CI = final packaging/release
+# validation, never remote debugging.
+#  - push to any branch / pull_request / workflow_dispatch (manual): build +
+#    test + browser smoke, NO publish (a manual run on a tag does not publish).
+#  - push of a tag vMAJOR.MINOR.PATCH whose commit is on the default branch
+#    `master` (verified with `git ls-remote --symref origin HEAD`): the same
+#    gate, then publish exactly the allowlisted assets to that GitHub release.
+# Policy is checked locally by conformance/tests/workflow_policy.rs.
 on:
   push:
+    branches: ['**']
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
   pull_request:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  test:
+  gate:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-      - name: Rust toolchain
+      - name: Rust toolchain (rust-toolchain.toml, incl. wasm32-unknown-unknown)
         run: rustup show
-      - name: Build pinned public runner independently
+      - name: Resolve the immutable public SDK pin
         shell: bash
         run: |
           set -euo pipefail
           SOURCE=$(cargo metadata --locked --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "cvd-indicator-cvd") | .dependencies[] | select(.name == "cvd-indicator-sdk") | .source')
           CORE_REV=$(printf '%s' "$SOURCE" | jq -Rr 'capture("rev=(?<rev>[0-9a-f]{40})").rev')
-          cargo install --locked --git https://github.com/k0Iry/cvd-core --rev "$CORE_REV" --root "$RUNNER_TEMP/core-tools" cvd-indicator-runner
-          printf 'CVD_INDICATOR_RUNNER=%s/core-tools/bin/cvd-indicator-runner\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
-          printf 'CVD_INDICATOR_RUNNER_SHA256=%s\n' "$(sha256sum "$RUNNER_TEMP/core-tools/bin/cvd-indicator-runner" | cut -d' ' -f1)" >> "$GITHUB_ENV"
-      - name: Build libraries
-        run: cargo build --locked --release --workspace
-      - name: Public real-library conformance
-        run: cargo test --locked --release --workspace -- --test-threads=1
+          echo "CORE_REV=$CORE_REV" >> "$GITHUB_ENV"
+      - name: Checkout public cvd-core at the same pin (browser host only)
+        uses: actions/checkout@v4
+        with:
+          repository: k0Iry/cvd-core
+          ref: ${{ env.CORE_REV }}
+          path: .core
+          persist-credentials: false
+      - name: Build the actual cvd-core browser host
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd .core
+          cargo build --locked --profile wasm-release --target wasm32-unknown-unknown -p cvd-browser-host --target-dir "$RUNNER_TEMP/core-target"
+          mkdir -p "$RUNNER_TEMP/wasm-host"
+          cp static/wasm-host/host-bridge.js static/wasm-host/plugin-worker.js "$RUNNER_TEMP/core-target/wasm32-unknown-unknown/wasm-release/cvd_browser_host.wasm" "$RUNNER_TEMP/wasm-host/"
+          echo "CVD_WASM_HOST_DIR=$RUNNER_TEMP/wasm-host" >> "$GITHUB_ENV"
+          echo "CVD_CHROMIUM=$(command -v google-chrome || command -v chromium)" >> "$GITHUB_ENV"
+      - name: Public gate (unit, package, wasm conformance, real Chromium)
+        env:
+          CVD_REQUIRE_BROWSER: '1'
+          CVD_RELEASE_VERSION: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+        run: scripts/public-gate.sh "$RUNNER_TEMP/gate"
+      - name: Upload allowlisted dist for the release job
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-dist
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/gate/dist/cvd_indicator_cvd.wasm
+            ${{ runner.temp }}/gate/dist/cvd_indicator_flow.wasm
+            ${{ runner.temp }}/gate/dist/cvd_indicator_example_range.wasm
+            ${{ runner.temp }}/gate/dist/manifest.json
+            ${{ runner.temp }}/gate/dist/SHA256SUMS
+
+  release:
+    needs: gate
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Optional: configure required reviewers on this environment in repo
+    # settings. Not verified/enforced by this repository.
+    environment: public-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Trusted ref check (version tag; commit must be on master)
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/master
+      - uses: actions/download-artifact@v4
+        with:
+          name: public-dist
+          path: dist
+      - name: Verify hashes and manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          test "$(ls | sort | tr '\n' ' ')" = "SHA256SUMS cvd_indicator_cvd.wasm cvd_indicator_example_range.wasm cvd_indicator_flow.wasm manifest.json "
+          sha256sum -c SHA256SUMS
+          jq -e --arg t "$GITHUB_REF_NAME" '.release == $t and (.sdk.source | startswith("git+https://github.com/k0Iry/cvd-core.git?rev="))' manifest.json
+      - name: Publish explicit assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+            --notes "Public cvd-wasm v1 indicator modules (CVD, Flow, example.range). Import the .wasm locally in the CVD browser; verify against SHA256SUMS / manifest.json." \
+            dist/cvd_indicator_cvd.wasm dist/cvd_indicator_flow.wasm dist/cvd_indicator_example_range.wasm dist/manifest.json dist/SHA256SUMS

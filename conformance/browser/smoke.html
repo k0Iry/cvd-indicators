@@ -1,0 +1,49 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>cvd public wasm smoke</title>
+<script type="module">
+// Replays the shared corpus through the ACTUAL cvd-core browser host
+// (host-bridge.js + plugin-worker.js + cvd_browser_host.wasm), loopback only.
+import { WasmPluginHost } from '/host/host-bridge.js'
+const get = async (u) => new Uint8Array(await (await fetch(u)).arrayBuffer())
+const r = { steps: [], cases: [] }
+const step = (name, ok, detail) => r.steps.push({ name, ok: !!ok, detail })
+try {
+  const host = await WasmPluginHost.create(await get('/host/cvd_browser_host.wasm'))
+  const corpus = await (await fetch('/corpus.json')).json()
+  const mods = {}
+  let inst = 1
+  for (const c of corpus.cases) {
+    if (!mods[c.wasm]) {
+      mods[c.wasm] = await get('/artifacts/' + c.wasm)
+      const rep = await host.validateModule(mods[c.wasm])
+      step('validate.' + c.wasm, rep && rep.max_pages <= 8192, rep)
+    }
+    const id = inst++
+    const out = { name: c.name, create: null, steps: [] }
+    try {
+      const l = await host.load(id, mods[c.wasm], c.params)
+      out.create = { ok: true, descriptor: JSON.stringify(l.descriptor) }
+    } catch (e) { out.create = { ok: false, code: e.code, message: e.message } }
+    if (out.create.ok) {
+      const key = 'public:' + id
+      for (const s of c.steps) {
+        try {
+          out.steps.push({ ok: true, text: await host.compute(id, key, 1, s.op, s.body) })
+        } catch (e) { out.steps.push({ ok: false, code: e.code, message: e.message }) }
+      }
+      // Disable releases the instance; late compute is stale; reload recomputes identically.
+      host.disable(id)
+      const first = c.steps[0]
+      try { await host.compute(id, 'public:' + id, 1, first.op, first.body); out.disabled = 'resolved' } catch (e) { out.disabled = e.code }
+      await host.load(id, mods[c.wasm], c.params)
+      try { out.reloaded = await host.compute(id, 'public:' + id + ':r', 1, first.op, first.body) } catch (e) { out.reloaded = 'ERR ' + e.code }
+      host.disable(id)
+    }
+    r.cases.push(out)
+  }
+  const s = host.stats()
+  step('host.clean_after_run', s.running === 0 && s.waiters === 0 && s.timers === 0 && s.pending === 0, s)
+} catch (e) { step('exception', false, String(e && e.stack || e)) }
+window.__smoke = r
+</script>

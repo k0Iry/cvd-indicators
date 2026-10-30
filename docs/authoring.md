@@ -1,15 +1,16 @@
-# Build an independent indicator library
+# Author a browser indicator (cvd-wasm v1)
 
-The SDK/ABI has one authority: public cvd-core revision `81e77770902b7e760c66905eec473d66fb6e2fe3`.
-Libraries only compute values; the host owns market data, persistence, input
-validation, process supervision and browser rendering. Never put JavaScript
-or host mutation commands in library output. The first supported target is Linux.
+An indicator is a Rust crate compiled to a standalone WebAssembly module.
+Users import the `.wasm` file locally in the CVD chart; the browser runs it in
+an isolated Worker with **no imports**: no DOM, network, storage, clock or JS.
+The module only computes values from the bars the host gives it. The normative
+contract is cvd-core `docs/plugin-wasm-v1.md` (ABI v1).
 
-## A standalone crate, outside this workspace
+## A standalone crate
 
-1. Create a directory outside this checkout, for example `$HOME/my-range-indicator`.
+1. Create a directory outside this checkout, e.g. `$HOME/my-range-indicator`.
 2. Copy `examples/range/src/lib.rs` into its `src/lib.rs`.
-3. Use this complete `Cargo.toml`:
+3. `Cargo.toml` (use the same cvd-core `rev` as this repository's `Cargo.toml`):
 
 ```toml
 [package]
@@ -21,43 +22,65 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-cvd-indicator-sdk = { git = "https://github.com/k0Iry/cvd-core.git", rev = "81e77770902b7e760c66905eec473d66fb6e2fe3" }
+cvd-indicator-sdk = { git = "https://github.com/k0Iry/cvd-core.git", rev = "<CVD_CORE_SDK_REV>" }
 serde_json = "1.0"
 
-[profile.release]
-panic = "unwind"
+[profile.wasm-release]
+inherits = "release"
+panic = "abort"
+opt-level = 3
+lto = true
+codegen-units = 1
 ```
 
-Run `cargo build --release` in that directory. The output is
-`target/release/libmy_range_indicator.so`; it uses no sibling/private crates.
-Before installing alongside the example, change its descriptor id from
-`example.range` to your own stable namespaced id and update the display name.
-Keep configured id and descriptor id identical.
+4. `.cargo/config.toml` (required: the host rejects modules without a declared
+   memory maximum <= 512 MiB):
+
+```toml
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=--max-memory=536870912"]
+```
+
+5. Build:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo build --profile wasm-release --target wasm32-unknown-unknown
+# target/wasm32-unknown-unknown/wasm-release/my_range_indicator.wasm
+```
+
+No wasm-bindgen, wasm-pack or JavaScript is involved. Before sharing, change the
+descriptor id from `example.range` to your own stable namespaced id.
 
 ## Implement the contract
 
-Follow the copied example's `Indicator` implementation and
-`export_indicator!` entry point. Its descriptor declares parameters, output
-kinds, pane placement, styling, and bounded historical context. Compute from
-`ComputeContext`, including its explicit history/live phase and requested
-mode; emit one output position per required input time. Emit `None`/JSON null
-for unavailable points, never a fake zero or a shorter reindexed array.
+Implement `Indicator` and call `export_indicator!(MyType)` (on wasm32 it emits
+the cvd-wasm exports). The descriptor declares parameters, output kinds, pane
+placement, styling and bounded historical context. Compute from
+`ComputeContext` (explicit history/live phase and requested source/aggregate
+mode); emit one output position per requested bar. Emit `None`/JSON `null`
+for unavailable points — never a fake zero or a shorter reindexed array.
 
-Keep `panic = "unwind"` so the SDK catches ordinary Rust panics at the C ABI
-boundary. Abort, memory faults and hangs still require runner supervision.
-The runner invokes a versioned C-compatible ABI, not Rust's native ABI.
+Semantics you can rely on:
 
-## Integrate and verify
+- **History is stateless.** Every history request runs on a fresh instance
+  built from the load-time parameters; it never sees or changes live state.
+- **Live** is one persistent instance: `live_init` with a bounded window, then
+  `live_update` deltas (`append`/`replace`) with a fixed revision and strictly
+  consecutive `seq`. Recompute the touched bars; never accumulate across a
+  replaced bar.
+- Parameters are validated by the SDK against your descriptor at load; invalid
+  parameters fail the load with `invalid_params`.
+- A panic is a WebAssembly trap: the host terminates the Worker and the user
+  must re-enable the indicator. Return `PluginError` for expected failures.
+- Limits: module 16 MiB, input/output 32 MiB, memory 512 MiB, compute deadline
+  (default 5 s). Exceeding them stops the plugin, not the chart.
 
-Build/install the same pinned public `cvd-indicator-runner` as in the root
-README. List the absolute library path and matching id in the operator's core
-TOML config. Reconfigure/restart core; recompiling core is not required.
+## Verify
 
-Use `conformance/` as the real-process test pattern. Test valid and invalid
-parameters, incomplete context, both source/aggregate modes, append/forming
-replacement, restart/replay, gaps, non-finite rejection and declared output
-styles. Do not merely call the Rust algorithm directly: exercise the built
-`.so` under the separate runner and inspect its actual protocol response.
-
-Only install operator-trusted libraries. A native process boundary contains
-ordinary failures; it does not sandbox arbitrary malicious native code.
+Use `conformance/` as the pattern: load the built `.wasm` with an empty import
+object (`WasmPlugin::load`) and assert on its actual responses — valid/invalid
+parameters, incomplete context, both modes, append/replace, stateless history,
+gaps, non-finite rejection and declared output styles. Then import it in the
+chart (Indicators → Import) to check rendering. Browser import is local only;
+nothing is uploaded.

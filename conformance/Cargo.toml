@@ -2,7 +2,7 @@
 license.workspace = true
 rust-version.workspace = true
 name = "cvd-indicators-conformance"
-description = "Output conformance + real runner integration tests for the public indicator libraries"
+description = "cvd-wasm v1 conformance for the public browser indicator modules: executes the real .wasm artifacts"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
@@ -10,3 +10,7 @@ publish.workspace = true
 [dependencies]
 cvd-indicator-sdk.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
+# Test-side execution of the real wasm32 artifacts (native harness only; the
+# browser executes plugins with native WebAssembly, never an interpreter).
+wasmi = { version = "1.1", default-features = false, features = ["std"] }

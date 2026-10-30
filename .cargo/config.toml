@@ -1,0 +1,5 @@
+# cvd-wasm v1 module profile (cvd-core docs/plugin-wasm-v1.md): every wasm32
+# artifact declares a linear-memory maximum <= 8192 pages (512 MiB), so the
+# browser enforces the cap on every memory.grow. Do not add local paths here.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=--max-memory=536870912"]

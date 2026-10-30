@@ -16,9 +16,18 @@ rust-version = "1.96"
 
 [workspace.dependencies]
 # One public SDK authority, pinned for independently reproducible builds.
-cvd-indicator-sdk = { git = "https://github.com/k0Iry/cvd-core.git", rev = "81e77770902b7e760c66905eec473d66fb6e2fe3" }
+cvd-indicator-sdk = { git = "https://github.com/k0Iry/cvd-core.git", rev = "5e2f2f1a511edc2fdd68248c1995c407e1ab460a" }
 serde_json = "1.0"
 
 [profile.release]
-# The SDK catches panics at the C ABI boundary; unwinding must stay enabled.
+# Native builds (test oracle only) keep unwinding so the SDK can catch panics.
 panic = "unwind"
+
+# Browser plugin artifacts: `cargo build --profile wasm-release --target wasm32-unknown-unknown`.
+# A wasm trap is fatal to the plugin Worker, so panics abort.
+[profile.wasm-release]
+inherits = "release"
+panic = "abort"
+opt-level = 3
+lto = true
+codegen-units = 1
