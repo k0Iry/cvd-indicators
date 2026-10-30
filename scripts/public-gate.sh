@@ -33,6 +33,8 @@ CVD_WASM_DIR="$OUT/dist" cargo test "${CFG[@]}" --locked --release -p cvd-indica
 CVD_WASM_DIR="$OUT/dist" cargo run "${CFG[@]}" --locked --release -q -p cvd-indicators-conformance --bin corpus -- "$OUT/corpus.json"
 if [[ -n "${CVD_WASM_HOST_DIR:-}" ]]; then
   echo "== real Chromium through the actual cvd-core browser host"
+  echo "-- owned browser teardown unit/controls"
+  node --test conformance/browser/harness-teardown.test.mjs
   echo "-- harness failure path: early browser death must settle bounded and clean up"
   CVD_WASM_DIR="$OUT/dist" CVD_CORPUS="$OUT/corpus.json" CVD_SMOKE_FAULT=kill-browser node conformance/browser/public-smoke.mjs
   CVD_WASM_DIR="$OUT/dist" CVD_CORPUS="$OUT/corpus.json" node conformance/browser/public-smoke.mjs

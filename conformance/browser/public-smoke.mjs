@@ -18,6 +18,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { spawn } from 'node:child_process'
 import assert from 'node:assert/strict'
+import { teardown } from './harness-teardown.mjs'
 
 const HERE = path.dirname(new URL(import.meta.url).pathname)
 const { CVD_WASM_DIR: WASM, CVD_WASM_HOST_DIR: HOST, CVD_CORPUS: CORPUS } = process.env
@@ -39,6 +40,8 @@ const server = http.createServer((req, res) => {
   res.writeHead(200, { 'content-type': types[path.extname(f)] || 'application/octet-stream', 'cache-control': 'no-store' })
   fs.createReadStream(f).pipe(res)
 })
+const sockets = new Set()
+server.on('connection', s => { sockets.add(s); s.on('close', () => sockets.delete(s)) })
 await new Promise(r => server.listen(0, '127.0.0.1', r))
 const port = server.address().port
 const profile = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'cvd-public-smoke-'))
@@ -50,13 +53,11 @@ const chromeExited = new Promise(r => { if (chrome.exitCode !== null || chrome.s
 const withTimeout = (p, ms, what) => {
   let t; return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`${what} timed out after ${ms} ms`)), ms) })]).finally(() => clearTimeout(t))
 }
-// Stop ONLY our spawned process; confirm exit before deleting its profile.
+// Owned teardown (main pid + exact-profile helpers, server/sockets, exact
+// profile removal with reappearance check). Failure is never swallowed.
+let cleanup
 async function stopChrome () {
-  if (chrome.exitCode === null && chrome.signalCode === null) chrome.kill('SIGTERM')
-  try { await withTimeout(chromeExited, 5000, 'chromium SIGTERM exit') } catch {
-    chrome.kill('SIGKILL'); await withTimeout(chromeExited, 5000, 'chromium SIGKILL exit')
-  }
-  fs.rmSync(profile, { recursive: true, force: true })
+  cleanup = await teardown({ child: chrome, server, sockets, profileDir: profile, opts: { graceMs: 5000, killMs: 5000 } })
 }
 let result
 let ws
@@ -107,8 +108,9 @@ try {
   result = { faultError: String(e.message || e) }
 } finally {
   try { ws && ws.close() } catch {}
-  await stopChrome(); server.close()
+  await stopChrome()
 }
+assert.ok(cleanup && cleanup.ok, 'owned cleanup ' + JSON.stringify(cleanup))
 if (FAULT === 'kill-browser') {
   const ms = Date.now() - t0
   assert.ok(result && result.faultError, 'killed browser must reject the pending run')
