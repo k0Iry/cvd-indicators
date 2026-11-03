@@ -19,7 +19,8 @@
 //! The SDK source is read from Cargo.lock. A local development override
 //! (`CVD_SDK_PATH`, which adds a Cargo `[patch]` via `--config`) is recorded as
 //! `local-override` and refused unless `--allow-local-sdk` is given; a release
-//! must use the immutable public cvd-core git pin.
+//! must use the immutable public cvd-core git pin. `source.commit` is read from
+//! the checkout itself; `--version` refuses a checkout with modified tracked files.
 use cvd_indicators_conformance::{dist, sha256_hex, WasmPlugin, PUBLIC, STATUS_OK};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -45,6 +46,30 @@ fn sdk_source(root: &Path) -> Option<String> {
     None
 }
 
+/// Source provenance from the actual checkout (never an injected string):
+/// `{"commit": <HEAD>}` when tracked files are unmodified, else `dirty: true`.
+/// Untracked paths (e.g. CI's nested `.core` host checkout) are ignored.
+fn source_commit(root: &Path) -> serde_json::Value {
+    let git = |a: &[&str]| {
+        Command::new("git")
+            .current_dir(root)
+            .args(a)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    let commit = git(&["rev-parse", "--verify", "HEAD^{commit}"])
+        .filter(|c| c.len() == 40 && c.bytes().all(|b| b.is_ascii_hexdigit()));
+    match (
+        commit,
+        git(&["status", "--porcelain", "--untracked-files=no"]),
+    ) {
+        (Some(c), Some(s)) if s.is_empty() => json!({ "commit": c }),
+        (c, _) => json!({ "commit": c, "dirty": true }),
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let out = PathBuf::from(
@@ -62,6 +87,16 @@ fn main() {
     let version = flag("--version")
         .map(|i| args[i + 1].clone())
         .unwrap_or_else(|| format!("v{pkg_version}-dev"));
+    let semver = |v: &str| {
+        let p: Vec<&str> = v.strip_prefix('v').unwrap_or("").split('.').collect();
+        p.len() == 3
+            && p.iter()
+                .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    if flag("--version").is_some() && version != "dev" && !semver(&version) {
+        eprintln!("package: --version must be `dev` or vMAJOR.MINOR.PATCH, got {version}");
+        std::process::exit(2);
+    }
 
     let allowed: Vec<&str> = PUBLIC
         .iter()
@@ -120,6 +155,12 @@ fn main() {
             }
         };
 
+        let provenance = source_commit(&root);
+        assert!(
+            flag("--version").is_none() || provenance.get("dirty").is_none(),
+            "a release (--version) must be packaged from a clean git checkout: {provenance}"
+        );
+
         let target = std::env::var_os("CARGO_TARGET_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join("target"));
@@ -159,6 +200,7 @@ fn main() {
             "format": "cvd-public-indicators-manifest/1",
             "repository": "https://github.com/k0Iry/cvd-indicators",
             "release": version,
+            "source": provenance,
             "abi": {"wasm": 1, "descriptor": 1, "target": "wasm32-unknown-unknown", "profile": "wasm-release"},
             "sdk": {"crate": "cvd-indicator-sdk", "source": source},
             "toolchain": String::from_utf8_lossy(&Command::new("rustc").arg("-V").output().map(|o| o.stdout).unwrap_or_default()).trim(),

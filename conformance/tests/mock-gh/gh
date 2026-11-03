@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Local stand-in for the `gh api` calls made by scripts/publish-dev.sh.
+# State in $MOCK_GH: releases/<id>/{tag,target,draft,prerelease,assets/<name>},
+# aid/<asset-id> -> "<release-id>/<name>", tags/<tag> (sha), latest (tag name),
+# next (id counter); every call is appended to $MOCK_GH/log.
+# Visibility follows GitHub: releases/tags/<t> and releases/latest only see
+# published (non-draft) releases; a tag can back one published release.
+# Faults: `fail` (ERE lines; a matching call exits HTTP 500 before mutating),
+# `corrupt-upload` (uploaded bytes flipped), `corrupt-public` (downloads of
+# published releases' assets flipped).
+set -euo pipefail
+S="$MOCK_GH"
+echo "gh $*" >>"$S/log"
+if [[ -s "$S/fail" ]] && grep -Eq -f "$S/fail" <<<"gh $*"; then
+  echo "gh: Server Error (HTTP 500)" >&2; exit 1
+fi
+[[ "$1" == api ]] || exit 9; shift
+M=GET; H=""; IN=""; declare -A F=()
+while (($#)); do case "$1" in
+  -X) M=$2; shift 2 ;;
+  -H) H=$2; shift 2 ;;
+  --input) IN=$2; shift 2 ;;
+  -f|-F) F[${2%%=*}]=${2#*=}; shift 2 ;;
+  -*) exit 9 ;;
+  *) P=$1; shift ;;
+esac; done
+nf() { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+next() { local n; n=$(cat "$S/next"); echo $((n + 1)) >"$S/next"; echo "$n"; }
+json_rel() {
+  local d="$S/releases/$1" a="[]" f
+  for f in "$S"/aid/*; do [[ -f "$f" ]] || continue
+    [[ "$(cat "$f")" == "$1/"* ]] && a=$(jq -c --argjson i "$(basename "$f")" --arg n "$(cut -d/ -f2 <"$f")" '. + [{id: $i, name: $n}]' <<<"$a")
+  done
+  jq -nc --argjson id "$1" --arg t "$(cat "$d/tag")" --argjson dr "$(cat "$d/draft")" \
+    --argjson p "$(cat "$d/prerelease")" --argjson a "$a" \
+    '{id: $id, tag_name: $t, draft: $dr, prerelease: $p, assets: $a}'
+}
+published_with() { local d; for d in "$S"/releases/*; do
+  [[ "$(cat "$d/tag")" == "$1" && "$(cat "$d/draft")" == false ]] && { basename "$d"; return 0; }
+done; return 1; }
+P=${P#https://uploads.github.com/}
+[[ "$P" =~ ^repos/k0Iry/cvd-indicators/(.*)$ ]] || exit 9
+p=${BASH_REMATCH[1]}
+case "$M $p" in
+  "GET releases/latest") jq -nc --arg t "$(cat "$S/latest")" '{tag_name: $t}' ;;
+  "GET releases/tags/"*) id=$(published_with "${p#releases/tags/}") || nf; json_rel "$id" ;;
+  "GET releases/assets/"*)
+    [[ "$H" == "Accept: application/octet-stream" ]] || exit 9
+    a="$S/aid/${p#releases/assets/}"; [[ -f "$a" ]] || nf
+    r=$(cut -d/ -f1 <"$a"); cat "$S/releases/$r/assets/$(cut -d/ -f2 <"$a")"
+    if [[ -f "$S/corrupt-public" && "$(cat "$S/releases/$r/draft")" == false ]]; then printf x; fi ;;
+  "GET releases/"*) [[ -d "$S/releases/${p#releases/}" ]] || nf; json_rel "${p#releases/}" ;;
+  "GET git/ref/tags/"*) t="$S/tags/${p#git/ref/tags/}"; [[ -f "$t" ]] || nf
+    jq -nc --arg s "$(cat "$t")" '{object: {sha: $s, type: "commit"}}' ;;
+  "POST releases")
+    [[ "${F[draft]}" == true && "${F[make_latest]}" == false ]] || exit 9
+    id=$(next); d="$S/releases/$id"; mkdir -p "$d/assets"
+    echo "${F[tag_name]}" >"$d/tag"; echo "${F[target_commitish]}" >"$d/target"
+    echo true >"$d/draft"; echo "${F[prerelease]}" >"$d/prerelease"; json_rel "$id" ;;
+  "POST releases/"*/assets\?name=*)
+    [[ "$H" == "Content-Type: application/octet-stream" && -f "$IN" ]] || exit 9
+    r=${p#releases/}; r=${r%%/*}; n=${p#*name=}; [[ -d "$S/releases/$r" ]] || nf
+    [[ ! -f "$S/releases/$r/assets/$n" ]] || { echo "already_exists (HTTP 422)" >&2; exit 1; }
+    cp "$IN" "$S/releases/$r/assets/$n"
+    if [[ -f "$S/corrupt-upload" ]]; then printf x >>"$S/releases/$r/assets/$n"; fi
+    a=$(next); echo "$r/$n" >"$S/aid/$a"; echo "{\"id\": $a}" ;;
+  "PATCH releases/"*)
+    id=${p#releases/}; d="$S/releases/$id"; [[ -d "$d" ]] || nf
+    t=${F[tag_name]:-$(cat "$d/tag")}; dr=${F[draft]:-$(cat "$d/draft")}
+    if [[ "$dr" == false ]]; then
+      o=$(published_with "$t") && [[ "$o" != "$id" ]] && { echo "tag already_exists (HTTP 422)" >&2; exit 1; }
+      [[ -f "$S/tags/$t" ]] || cat "$d/target" >"$S/tags/$t"
+    fi
+    echo "$t" >"$d/tag"; echo "$dr" >"$d/draft"
+    [[ -n "${F[prerelease]:-}" ]] && echo "${F[prerelease]}" >"$d/prerelease"
+    if [[ "$dr" == false && "${F[make_latest]:-true}" != false && "$(cat "$d/prerelease")" == false ]]; then
+      echo "$t" >"$S/latest"; fi
+    json_rel "$id" ;;
+  "DELETE releases/"*)
+    id=${p#releases/}; [[ -d "$S/releases/$id" ]] || nf; rm -rf "$S/releases/$id"
+    grep -l "^$id/" "$S"/aid/* 2>/dev/null | xargs -r rm -f ;;
+  "PATCH git/refs/tags/"*)
+    t="$S/tags/${p#git/refs/tags/}"; [[ -f "$t" ]] || nf
+    [[ "${F[sha]}" =~ ^[0-9a-f]{40}$ && "${F[force]}" == true ]] || exit 9; echo "${F[sha]}" >"$t"; echo '{}' ;;
+  "POST git/refs")
+    [[ "${F[sha]}" =~ ^[0-9a-f]{40}$ && "${F[ref]}" =~ ^refs/tags/([^/]+)$ ]] || exit 9
+    t="$S/tags/${BASH_REMATCH[1]}"; [[ ! -f "$t" ]] || { echo "Reference already exists (HTTP 422)" >&2; exit 1; }
+    echo "${F[sha]}" >"$t"; echo '{}' ;;
+  "DELETE git/refs/tags/"*) t="$S/tags/${p#git/refs/tags/}"; [[ -f "$t" ]] || nf; rm "$t" ;;
+  *) exit 9 ;;
+esac

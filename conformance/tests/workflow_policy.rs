@@ -46,11 +46,62 @@ fn job<'a>(w: &'a str, name: &str) -> &'a str {
     &rest[..e]
 }
 
-const PUBLISH_IF: &str = "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')";
+const UPSTREAM: &str = "k0Iry/cvd-indicators";
+const PUBLISH_IF: &str =
+    "github.event_name == 'push' && github.repository == 'k0Iry/cvd-indicators' && startsWith(github.ref, 'refs/tags/v')";
+const DEV_IF: &str =
+    "github.event_name == 'push' && github.repository == 'k0Iry/cvd-indicators' && github.ref == 'refs/heads/master'";
+const UPLOAD_IF: &str = "github.event_name == 'push' && github.repository == 'k0Iry/cvd-indicators' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/master')";
 
-fn publishes(event: &str, git_ref: &str) -> bool {
-    event == "push" && git_ref.starts_with("refs/tags/v")
+/// Evaluations of the three asserted `if:` expressions.
+fn publishes(event: &str, repo: &str, git_ref: &str) -> bool {
+    event == "push" && repo == UPSTREAM && git_ref.starts_with("refs/tags/v")
 }
+fn publishes_dev(event: &str, repo: &str, git_ref: &str) -> bool {
+    event == "push" && repo == UPSTREAM && git_ref == "refs/heads/master"
+}
+fn uploads(event: &str, repo: &str, git_ref: &str) -> bool {
+    event == "push"
+        && repo == UPSTREAM
+        && (git_ref.starts_with("refs/tags/v") || git_ref == "refs/heads/master")
+}
+
+/// (event, repository, ref, stable release, dev refresh)
+const MATRIX: [(&str, &str, &str, bool, bool); 9] = [
+    ("push", UPSTREAM, "refs/tags/v1.2.3", true, false),
+    ("push", UPSTREAM, "refs/heads/master", false, true),
+    ("push", UPSTREAM, "refs/heads/feature", false, false),
+    ("push", UPSTREAM, "refs/heads/master-x", false, false),
+    (
+        "push",
+        "fork/cvd-indicators",
+        "refs/heads/master",
+        false,
+        false,
+    ),
+    (
+        "push",
+        "fork/cvd-indicators",
+        "refs/tags/v1.2.3",
+        false,
+        false,
+    ),
+    ("pull_request", UPSTREAM, "refs/pull/7/merge", false, false),
+    (
+        "workflow_dispatch",
+        UPSTREAM,
+        "refs/heads/master",
+        false,
+        false,
+    ),
+    (
+        "workflow_dispatch",
+        UPSTREAM,
+        "refs/tags/v1.2.3",
+        false,
+        false,
+    ),
+];
 
 #[test]
 fn triggers_include_push_pr_and_manual() {
@@ -86,17 +137,87 @@ fn only_version_tag_pushes_publish() {
         "default branch is master"
     );
     assert!(release.contains("persist-credentials: false"));
-    // matrix of events/refs
-    for (ev, r, want) in [
-        ("push", "refs/tags/v1.2.3", true),
-        ("push", "refs/heads/master", false),
-        ("push", "refs/heads/feature", false),
-        ("pull_request", "refs/pull/7/merge", false),
-        ("workflow_dispatch", "refs/heads/master", false),
-        ("workflow_dispatch", "refs/tags/v1.2.3", false),
-    ] {
-        assert_eq!(publishes(ev, r), want, "{ev} {r}");
+    // payload provenance: this tag's commit, from the gate's own checkout
+    assert!(
+        release.contains(r#"--arg c "$GITHUB_SHA" '.release == $t and .source == {commit: $c}"#)
+    );
+    // a formal release is created once; `gh release create` refuses an existing one
+    assert!(
+        !release.contains("--clobber")
+            && !release.contains("release upload")
+            && !release.contains("release edit")
+    );
+    for (ev, repo, r, want, _) in MATRIX {
+        assert_eq!(publishes(ev, repo, r), want, "{ev} {repo} {r}");
     }
+}
+
+#[test]
+fn only_upstream_master_pushes_refresh_dev() {
+    let w = workflow();
+    let dev = job(&w, "publish-dev");
+    assert!(dev.contains(&format!("if: {DEV_IF}")), "publish-dev gate");
+    assert!(dev.contains("needs: gate"));
+    // serialized, never cancelling a running publication
+    assert!(
+        dev.contains("concurrency:\n      group: publish-dev\n      cancel-in-progress: false\n")
+    );
+    assert!(dev.contains("persist-credentials: false"));
+    assert!(dev.contains("name: public-dist") && dev.contains("path: dist"));
+    assert!(dev.contains("GH_TOKEN: ${{ github.token }}"));
+    assert!(dev.contains("run: scripts/publish-dev.sh dist"));
+    // reuses the gate dist: no build/package in the publisher
+    for no in ["cargo", "public-gate", "rustup", "secrets."] {
+        assert!(!dev.contains(no), "publish-dev must not contain {no}");
+    }
+    // gate records release `dev` exactly for master pushes
+    assert!(w.contains("github.event_name == 'push' && github.ref == 'refs/heads/master' && 'dev'"));
+    // the `dev` tag never matches the tag trigger (no second build)
+    assert!(!triggers(&w).iter().any(|l| l.contains("dev")));
+    for (ev, repo, r, _, want) in MATRIX {
+        assert_eq!(publishes_dev(ev, repo, r), want, "{ev} {repo} {r}");
+        assert!(!(publishes(ev, repo, r) && publishes_dev(ev, repo, r)));
+    }
+}
+
+#[test]
+fn publish_dev_script_writes_only_the_dev_release() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let s = std::fs::read_to_string(root.join("scripts/publish-dev.sh")).unwrap();
+    assert!(s.contains("\nTAG=dev\n"));
+    assert!(!s.contains("gh release "), "only id-bound gh api writes");
+    // every write targets this run's draft, the previous dev release id
+    // (read from releases/tags/$TAG), or refs/tags/$TAG
+    let ok = [
+        "\"$R/releases\" -f tag_name=\"$STAGE\"",
+        "\"$R/releases/$NEW_ID\"",
+        "\"$R/releases/$OLD_ID\"",
+        "\"https://uploads.github.com/$R/releases/$NEW_ID/assets?name=$f\"",
+        "\"$R/git/refs/tags/$TAG\"",
+        "\"$R/git/refs\" -f ref=\"refs/tags/$TAG\"",
+    ];
+    let joined = s.replace("\\\n", " ");
+    for l in joined.lines().filter(|l| l.contains("gh api -X")) {
+        assert!(ok.iter().any(|o| l.contains(o)), "unbound write: {l}");
+        if l.contains("draft=false") {
+            assert!(
+                l.contains("-f make_latest=false") && l.contains("-F prerelease=true"),
+                "{l}"
+            );
+        }
+    }
+    assert!(s.contains("OLD_ID=$(jq -er .id <<<\"$old\")"));
+    assert_eq!(
+        s.matches("master_is_us || rc=$?").count(),
+        2,
+        "initial + late freshness"
+    );
+    assert!(!s.contains("secrets.") && !s.contains("set -x"));
+    // stable: manifest SDK must equal this checkout's complete Cargo.lock pin
+    let w = workflow();
+    let rel = job(&w, "release");
+    assert!(rel.contains(".sdk.source == $s' --arg s \"$SDK\" manifest.json"));
+    assert!(rel.contains("Cargo.lock") && !rel.contains("startswith"));
 }
 
 #[test]
@@ -112,12 +233,16 @@ fn permissions_and_assets_are_bounded() {
         "gate job must stay read-only"
     );
     assert!(
-        gate.contains(&format!("if: {PUBLISH_IF}")),
+        gate.contains(&format!("if: {UPLOAD_IF}")),
         "dist upload only for publishing refs"
     );
+    for (ev, repo, r, stable, dev) in MATRIX {
+        assert_eq!(uploads(ev, repo, r), stable || dev, "{ev} {repo} {r}");
+    }
     let release = job(&w, "release");
-    assert_eq!(w.matches("contents: write").count(), 1);
+    assert_eq!(w.matches("contents: write").count(), 2);
     assert!(release.contains("contents: write"));
+    assert!(job(&w, "publish-dev").contains("contents: write"));
     // explicit allowlist, never a directory/glob
     for a in [
         "cvd_indicator_cvd.wasm",
@@ -150,7 +275,10 @@ fn release_allowlists_match_public_package_set_exactly() {
         .iter()
         .map(|(_, wasm, _)| wasm.to_string())
         .collect();
-    assert!(want.contains("cvd_indicator_orderbook.wasm"), "orderbook is public");
+    assert!(
+        want.contains("cvd_indicator_orderbook.wasm"),
+        "orderbook is public"
+    );
     want.insert("manifest.json".into());
     want.insert("SHA256SUMS".into());
     let names = |text: &str, prefix: &str| -> BTreeSet<String> {
@@ -171,12 +299,24 @@ fn release_allowlists_match_public_package_set_exactly() {
         .lines()
         .find(|l| l.contains("test \"$(ls | sort"))
         .expect("exact-set listing check");
-    let listed = line.rsplit("= \"").next().unwrap().trim_end_matches('"').trim();
+    let listed = line
+        .rsplit("= \"")
+        .next()
+        .unwrap()
+        .trim_end_matches('"')
+        .trim();
     let listed: Vec<&str> = listed.split_whitespace().collect();
     let mut sorted = listed.clone();
     sorted.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
     assert_eq!(listed, sorted, "ls | sort order");
-    assert_eq!(listed.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>(), want, "verify allowlist");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<BTreeSet<_>>(),
+        want,
+        "verify allowlist"
+    );
     // 3. published assets
     let publish = &release[release.find("gh release create").expect("publish")..];
     assert_eq!(names(publish, "dist/"), want, "publish allowlist");

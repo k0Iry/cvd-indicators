@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Local stand-in for `git ls-remote --exit-code origin refs/heads/master`.
+# Answers $MOCK_GH/head; if $MOCK_GH/head-after exists, the 2nd and later
+# calls answer that instead (master moving during a publisher run).
+set -euo pipefail
+echo "git $*" >>"$MOCK_GH/log"
+[[ "$*" == "ls-remote --exit-code origin refs/heads/master" ]] || exit 9
+n=$(grep -c '^git ls-remote' "$MOCK_GH/log")
+h="$MOCK_GH/head"; [[ $n -ge 2 && -f "$MOCK_GH/head-after" ]] && h="$MOCK_GH/head-after"
+[[ -f "$h" ]] || { echo "fatal: unable to access remote" >&2; exit 128; }
+printf '%s\trefs/heads/master\n' "$(cat "$h")"

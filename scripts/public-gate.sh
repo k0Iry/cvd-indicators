@@ -7,7 +7,7 @@
 #   CVD_WASM_HOST_DIR   dir with cvd-core host-bridge.js, plugin-worker.js and
 #                       cvd_browser_host.wasm -> enables the real-Chromium smoke
 #   CVD_REQUIRE_BROWSER=1  fail instead of skipping when CVD_WASM_HOST_DIR is unset
-#   CVD_RELEASE_VERSION release tag recorded in the manifest
+#   CVD_RELEASE_VERSION `dev` or vX.Y.Z recorded in the manifest (needs a clean checkout)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:?usage: scripts/public-gate.sh <OUT_DIR>}"
@@ -24,7 +24,7 @@ if [[ -n "${CVD_RELEASE_VERSION:-}" ]]; then PKG+=(--version "$CVD_RELEASE_VERSI
 echo "== native unit tests (algorithms)"
 cargo test "${CFG[@]}" --locked --release -p cvd-indicator-cvd -p cvd-indicator-flow -p cvd-indicator-orderbook -p cvd-indicator-example-range
 echo "== packaging-output safety + CI workflow policy (local)"
-cargo test "${CFG[@]}" --locked --release -p cvd-indicators-conformance --test dist_safety --test workflow_policy
+cargo test "${CFG[@]}" --locked --release -p cvd-indicators-conformance --test dist_safety --test workflow_policy --test publish_dev
 echo "== package public allowlist (wasm-release, reproducible, manifest + SHA256SUMS)"
 cargo run "${CFG[@]}" --locked --release -q -p cvd-indicators-conformance --bin package -- "$OUT/dist" "${PKG[@]}" > "$OUT/package.log"
 ( cd "$OUT/dist" && sha256sum -c SHA256SUMS )
