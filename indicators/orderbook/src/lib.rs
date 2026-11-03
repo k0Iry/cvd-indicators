@@ -7,7 +7,7 @@
 //! units or quote notional (`price × quantity`, nominal; no FX conversion).
 //! Resting displayed liquidity only: not hidden orders, not executions.
 
-use cvd_indicator_sdk::book::{BookIndicator, BookSnapshot, PriceLevelRow, PriceLevels};
+use cvd_indicator_sdk::book::{BookSnapshot, PriceLevelRow, PriceLevels};
 use cvd_indicator_sdk::*;
 use std::collections::BTreeMap;
 
@@ -88,7 +88,9 @@ pub fn ladder(book: &BookSnapshot, rows: usize, group: f64, quote: bool) -> Resu
     })
 }
 
-impl BookIndicator for OrderBook {
+impl Indicator for OrderBook {
+    type Domain = Book;
+
     fn descriptor() -> Descriptor {
         Descriptor {
             id: ID.into(),
@@ -148,12 +150,12 @@ impl BookIndicator for OrderBook {
         })
     }
 
-    fn compute_book(&mut self, book: &BookSnapshot) -> Result<PriceLevels, PluginError> {
+    fn compute(&mut self, book: &BookSnapshot) -> Result<PriceLevels, PluginError> {
         ladder(book, self.rows, self.group, self.quote)
     }
 }
 
-cvd_indicator_sdk::export_book_indicator!(OrderBook);
+cvd_indicator_sdk::export_indicator!(Book: OrderBook);
 
 #[cfg(test)]
 mod tests {
@@ -241,20 +243,20 @@ mod tests {
     fn oversized_group_is_recoverable_invalid_params() {
         let b = book(); // best bid 100.4
         let mut p = OrderBook { rows: 20, group: 10_000.0, quote: false };
-        let e = p.compute_book(&b).unwrap_err();
+        let e = p.compute(&b).unwrap_err();
         assert_eq!(e.code, codes::INVALID_PARAMS);
         // Recovery: editing the parameter on the same instance shape works.
         p.group = 1.0;
-        let o = p.compute_book(&b).unwrap();
+        let o = p.compute(&b).unwrap();
         o.validate(&b).unwrap();
         assert!(o.rows.iter().all(|r| r.price > 0.0));
         // Any transmitted bid that would floor to bucket 0 is rejected (no
         // silent drop): lowest bid 99.0 < group 100.
         p.group = 100.0;
-        assert_eq!(p.compute_book(&b).unwrap_err().code, codes::INVALID_PARAMS);
+        assert_eq!(p.compute(&b).unwrap_err().code, codes::INVALID_PARAMS);
         // Largest group with positive buckets for every bid: floors to 100/50.
         p.group = 50.0;
-        let o = p.compute_book(&b).unwrap();
+        let o = p.compute(&b).unwrap();
         o.validate(&b).unwrap();
         let bids: Vec<_> = o.rows.iter().filter(|r| r.bid > 0.0).map(|r| (r.price, r.bid)).collect();
         assert_eq!(bids, vec![(100.0, 3.0), (50.0, 7.0)]);

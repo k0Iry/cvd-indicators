@@ -15,6 +15,8 @@ pub const OUTPUT: &str = "cvd";
 pub struct Cvd;
 
 impl Indicator for Cvd {
+    type Domain = Bars;
+
     fn descriptor() -> Descriptor {
         Descriptor {
             id: ID.into(),
@@ -45,9 +47,11 @@ impl Indicator for Cvd {
 
     fn compute(
         &mut self,
-        ctx: &ComputeContext<'_>,
-        bars: &[InputBar],
-        from: usize,
+        BarsInput {
+            ctx,
+            bars,
+            output_from: from,
+        }: BarsInput<'_>,
     ) -> Result<SeriesSet, PluginError> {
         let aggregate = ctx.scope.mode == Mode::Aggregate;
         let values = bars[from..]
@@ -61,7 +65,7 @@ impl Indicator for Cvd {
     }
 }
 
-export_indicator!(Cvd);
+export_indicator!(Bars: Cvd);
 
 #[cfg(test)]
 mod tests {
@@ -110,7 +114,13 @@ mod tests {
                 tf: "1m".into(),
                 mode,
             };
-            let out = Cvd.compute(&ctx(&scope, &params), &bars, 0).unwrap();
+            let out = Cvd
+                .compute(BarsInput {
+                    ctx: &ctx(&scope, &params),
+                    bars: &bars,
+                    output_from: 0,
+                })
+                .unwrap();
             assert_eq!(out[OUTPUT], SeriesValues::Line { values: want });
         }
     }

@@ -3,7 +3,7 @@
 An indicator is a Rust crate compiled to a standalone WebAssembly module.
 Users import the `.wasm` locally in the chart; the browser runs it in an
 isolated Worker with **no imports** (no DOM, network, storage, clock or JS).
-It only computes values from the bars the host provides. The normative contract
+It computes outputs from bars or order-book snapshots supplied by the host. The normative contract
 is cvd-core [`docs/plugin-wasm-v1.md`](https://github.com/k0Iry/cvd-core/blob/master/docs/plugin-wasm-v1.md).
 
 ## 1. Create a standalone crate
@@ -27,7 +27,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-cvd-indicator-sdk = { git = "https://github.com/k0Iry/cvd-core.git", rev = "d3862d1c2705933d627308d5b9a2cbfffb2afb2a" }
+cvd-indicator-sdk = { git = "https://github.com/k0Iry/cvd-core.git", rev = "cfe735a6e664baf0bf32300b247bedca0e79af7b" }
 serde_json = "1.0"
 
 [profile.wasm-release]
@@ -64,10 +64,28 @@ uploaded.
 
 ## 3. Implement the contract
 
-Implement `Indicator` and call `export_indicator!(MyType)`. The descriptor
-declares parameters, outputs, pane placement, styling and bounded historical
-context. Compute from `ComputeContext` (history/live phase and source/aggregate
-mode) and return exactly one value per requested bar, aligned to the input.
+Implement `Indicator` and export it:
+
+```rust
+impl Indicator for MyType {
+    type Domain = Bars; // or Book for an order-book view
+    fn descriptor() -> Descriptor { /* ... */ }
+    fn new(params: &ParamValues) -> Result<Self, PluginError> { /* ... */ }
+    fn compute(&mut self, i: BarsInput<'_>) -> Result<SeriesSet, PluginError> { /* ... */ }
+}
+export_indicator!(Bars: MyType);
+```
+
+A `Book` plugin's `compute` takes `&BookSnapshot` and returns `PriceLevels`
+(see `indicators/orderbook`); export it with `export_indicator!(Book: MyType)`.
+To adopt this SDK, migrate older source to the new trait and rebuild. The WASM
+v1 ABI is unchanged; older binaries are not deliberately rejected, but are not
+a supported compatibility target.
+
+The descriptor declares parameters, outputs, pane placement, styling and
+bounded historical context. Bar indicators compute from `i.ctx` (history/live phase and
+source/aggregate mode) and return exactly one value per requested bar
+`i.bars[i.output_from..]`, aligned to the input.
 Use `None` (JSON `null`) for unavailable points — never a fake zero or a
 shorter array.
 

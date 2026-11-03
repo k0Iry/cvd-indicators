@@ -42,6 +42,8 @@ pub fn buy_sell(buy: f64, sell: f64, delta: f64) -> Option<(f64, f64)> {
 pub struct Flow;
 
 impl Indicator for Flow {
+    type Domain = Bars;
+
     fn descriptor() -> Descriptor {
         let spec = |key: &str, label: &str, kind, readout_only| OutputSpec {
             key: key.into(),
@@ -89,9 +91,11 @@ impl Indicator for Flow {
 
     fn compute(
         &mut self,
-        ctx: &ComputeContext<'_>,
-        bars: &[InputBar],
-        from: usize,
+        BarsInput {
+            ctx,
+            bars,
+            output_from: from,
+        }: BarsInput<'_>,
     ) -> Result<SeriesSet, PluginError> {
         let aggregate = ctx.scope.mode == Mode::Aggregate;
         let n = bars.len() - from;
@@ -124,7 +128,7 @@ impl Indicator for Flow {
     }
 }
 
-export_indicator!(Flow);
+export_indicator!(Bars: Flow);
 
 #[cfg(test)]
 mod tests {

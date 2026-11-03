@@ -22,6 +22,8 @@ pub struct Range {
 }
 
 impl Indicator for Range {
+    type Domain = Bars;
+
     fn descriptor() -> Descriptor {
         Descriptor {
             id: ID.into(),
@@ -91,9 +93,11 @@ impl Indicator for Range {
 
     fn compute(
         &mut self,
-        ctx: &ComputeContext<'_>,
-        bars: &[InputBar],
-        from: usize,
+        BarsInput {
+            ctx,
+            bars,
+            output_from: from,
+        }: BarsInput<'_>,
     ) -> Result<SeriesSet, PluginError> {
         let agg = ctx.scope.mode == Mode::Aggregate;
         let close_only = self.source == "close";
@@ -133,7 +137,7 @@ impl Indicator for Range {
     }
 }
 
-export_indicator!(Range);
+export_indicator!(Bars: Range);
 
 #[cfg(test)]
 mod tests {
