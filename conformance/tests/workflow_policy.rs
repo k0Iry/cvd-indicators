@@ -138,3 +138,46 @@ fn permissions_and_assets_are_bounded() {
     );
     assert!(!w.contains("cvd-indicators-private"), "no private repo");
 }
+
+/// The exact public module set (conformance `PUBLIC`, which drives packaging)
+/// must agree with all three explicit release allowlists: gate upload,
+/// release download verification, and `gh release create` assets.
+#[test]
+fn release_allowlists_match_public_package_set_exactly() {
+    use std::collections::BTreeSet;
+    let w = workflow();
+    let mut want: BTreeSet<String> = cvd_indicators_conformance::PUBLIC
+        .iter()
+        .map(|(_, wasm, _)| wasm.to_string())
+        .collect();
+    assert!(want.contains("cvd_indicator_orderbook.wasm"), "orderbook is public");
+    want.insert("manifest.json".into());
+    want.insert("SHA256SUMS".into());
+    let names = |text: &str, prefix: &str| -> BTreeSet<String> {
+        text.split(|c: char| c.is_whitespace() || c == '"' || c == '\\')
+            .filter_map(|t| t.find(prefix).map(|i| &t[i + prefix.len()..]))
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    // 1. upload (gate job)
+    let gate = job(&w, "gate");
+    let up = &gate[gate.find("name: public-dist").expect("upload step")..];
+    let up = &up[..up.find("\n\n").unwrap_or(up.len())];
+    assert_eq!(names(up, "}}/gate/dist/"), want, "upload allowlist");
+    let release = job(&w, "release");
+    // 2. download verification: exact sorted listing
+    let line = release
+        .lines()
+        .find(|l| l.contains("test \"$(ls | sort"))
+        .expect("exact-set listing check");
+    let listed = line.rsplit("= \"").next().unwrap().trim_end_matches('"').trim();
+    let listed: Vec<&str> = listed.split_whitespace().collect();
+    let mut sorted = listed.clone();
+    sorted.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    assert_eq!(listed, sorted, "ls | sort order");
+    assert_eq!(listed.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>(), want, "verify allowlist");
+    // 3. published assets
+    let publish = &release[release.find("gh release create").expect("publish")..];
+    assert_eq!(names(publish, "dist/"), want, "publish allowlist");
+}

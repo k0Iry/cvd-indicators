@@ -65,6 +65,7 @@ jobs:
             ${{ runner.temp }}/gate/dist/cvd_indicator_cvd.wasm
             ${{ runner.temp }}/gate/dist/cvd_indicator_flow.wasm
             ${{ runner.temp }}/gate/dist/cvd_indicator_example_range.wasm
+            ${{ runner.temp }}/gate/dist/cvd_indicator_orderbook.wasm
             ${{ runner.temp }}/gate/dist/manifest.json
             ${{ runner.temp }}/gate/dist/SHA256SUMS
 
@@ -98,7 +99,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          test "$(ls | sort | tr '\n' ' ')" = "SHA256SUMS cvd_indicator_cvd.wasm cvd_indicator_example_range.wasm cvd_indicator_flow.wasm manifest.json "
+          test "$(ls | sort | tr '\n' ' ')" = "SHA256SUMS cvd_indicator_cvd.wasm cvd_indicator_example_range.wasm cvd_indicator_flow.wasm cvd_indicator_orderbook.wasm manifest.json "
           sha256sum -c SHA256SUMS
           jq -e --arg t "$GITHUB_REF_NAME" '.release == $t and (.sdk.source | startswith("git+https://github.com/k0Iry/cvd-core.git?rev="))' manifest.json
       - name: Publish explicit assets
@@ -106,5 +107,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
-            --notes "Public cvd-wasm v1 indicator modules (CVD, Flow, example.range). Import the .wasm locally in the CVD browser; verify against SHA256SUMS / manifest.json." \
-            dist/cvd_indicator_cvd.wasm dist/cvd_indicator_flow.wasm dist/cvd_indicator_example_range.wasm dist/manifest.json dist/SHA256SUMS
+            --notes "Public cvd-wasm v1 indicator modules (CVD, Flow, example.range, Order Book). Import the .wasm locally in the CVD browser; verify against SHA256SUMS / manifest.json." \
+            dist/cvd_indicator_cvd.wasm dist/cvd_indicator_flow.wasm dist/cvd_indicator_example_range.wasm dist/cvd_indicator_orderbook.wasm dist/manifest.json dist/SHA256SUMS

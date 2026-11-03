@@ -407,6 +407,9 @@ fn example_extension_has_params_context_and_gaps() {
 #[test]
 fn history_is_stateless_and_never_touches_the_live_instance() {
     for (_, file, id) in PUBLIC {
+        if id == "orderbook" {
+            continue; // book plugin: no bar history/live operations (see book test)
+        }
         let params = if id == "example.range" {
             r#"{"length":5}"#
         } else {
@@ -462,7 +465,52 @@ fn libraries_export_distinct_ids_and_only_public_inputs() {
     }
     ids.sort();
     ids.dedup();
-    assert_eq!(ids.len(), 3);
+    assert_eq!(ids.len(), 4);
+}
+
+fn book_body(bids: &[[f64; 2]], asks: &[[f64; 2]]) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "source": {"exchange": "binance", "market": "usdm", "symbol": "BTC"},
+        "base": "BTC", "quote": "USDT", "generation": 3, "seq": 99, "exchange_time_ms": 1_700_000_000_000i64,
+        "bids": bids, "asks": asks,
+        "coverage": {"bid_floor": bids.last().map(|l| l[0]).unwrap_or(0.0), "ask_ceiling": asks.last().map(|l| l[0]).unwrap_or(0.0)}
+    }))
+    .unwrap()
+}
+
+#[test]
+fn orderbook_plugin_book_only_contract() {
+    let mut m = WasmPlugin::file("cvd_indicator_orderbook.wasm");
+    let (s, d) = m.describe();
+    assert_eq!(s, STATUS_OK);
+    let d: Descriptor = serde_json::from_slice(&d).unwrap();
+    d.validate().unwrap();
+    assert!(d.is_book() && !d.live);
+    assert_eq!(d.outputs[0].kind, OutputKind::PriceLevels);
+    assert_eq!(
+        m.create(br#"{"rows":5,"group":1.0,"unit":"quote"}"#).0,
+        STATUS_OK
+    );
+    // Bar operations are not accepted by a book plugin.
+    assert_eq!(m.invoke(OP_HISTORY, b"{}").0, STATUS_INVALID_ARGUMENT);
+    let body = book_body(
+        &[[100.4, 1.0], [100.1, 2.0], [99.9, 3.0]],
+        &[[100.6, 5.0], [101.2, 1.0]],
+    );
+    let (s, out) = m.invoke(OP_BOOK, &body);
+    assert_eq!(s, STATUS_OK, "{}", String::from_utf8_lossy(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["unit"], "USDT");
+    assert_eq!(v["best_bid"], 100.4);
+    assert_eq!(v["rows"][0]["price"], 102.0);
+    assert_eq!(v["rows"].as_array().unwrap().len(), 4);
+    // Crossed / malformed books are rejected with a plugin error, not a trap.
+    let crossed = book_body(&[[101.0, 1.0]], &[[100.0, 1.0]]);
+    let (s, e) = m.invoke(OP_BOOK, &crossed);
+    assert_eq!(s, STATUS_ERROR);
+    let e: PluginError = serde_json::from_slice(&e).unwrap();
+    assert_eq!(e.code, codes::INVALID_INPUT);
+    assert_eq!(m.invoke(OP_BOOK, b"{").0, STATUS_ERROR);
 }
 
 #[test]
@@ -480,4 +528,61 @@ fn corpus_replay_is_deterministic_and_covers_ok_and_errors() {
         }
     }
     assert!(ok > 100 && err > 10, "ok={ok} err={err}");
+}
+
+/// Dedicated actual-WASM numeric acceptance for the public order-book plugin
+/// (exact/grouped × base/quote, invalid group + recovery, source switch).
+/// Expectations are hand-computed, not produced by the plugin's own code.
+#[test]
+fn orderbook_wasm_numeric_cases() {
+    let mut m = WasmPlugin::file("cvd_indicator_orderbook.wasm");
+    let eth = |sym: &str| {
+        let mut v: serde_json::Value = serde_json::from_slice(&book_body(
+            &[[2000.5, 1.0], [2000.25, 2.0], [1999.75, 4.0]],
+            &[[2001.0, 0.5], [2001.5, 3.0]],
+        ))
+        .unwrap();
+        v["source"]["symbol"] = sym.into();
+        v["base"] = sym.into();
+        serde_json::to_vec(&v).unwrap()
+    };
+    let rows = |m: &mut WasmPlugin, params: &str, body: &[u8]| -> (String, Rows) {
+        m.destroy(); // params edit = fresh instance (host reload semantics)
+        assert_eq!(m.create(params.as_bytes()).0, STATUS_OK, "{params}");
+        let (s, out) = m.invoke(OP_BOOK, body);
+        assert_eq!(s, STATUS_OK, "{params}: {}", String::from_utf8_lossy(&out));
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let r = v["rows"].as_array().unwrap().iter()
+            .map(|r| (r["price"].as_f64().unwrap(), r["bid"].as_f64().unwrap(), r["ask"].as_f64().unwrap()))
+            .collect();
+        (v["unit"].as_str().unwrap().to_string(), r)
+    };
+    let body = eth("ETH");
+    type Rows = Vec<(f64, f64, f64)>;
+    let cases: [(&str, &str, Rows); 4] = [
+        (r#"{"rows":5,"group":0.0,"unit":"base"}"#, "ETH",
+            vec![(2001.5, 0.0, 3.0), (2001.0, 0.0, 0.5), (2000.5, 1.0, 0.0), (2000.25, 2.0, 0.0), (1999.75, 4.0, 0.0)]),
+        (r#"{"rows":5,"group":0.0,"unit":"quote"}"#, "USDT",
+            vec![(2001.5, 0.0, 6004.5), (2001.0, 0.0, 1000.5), (2000.5, 2000.5, 0.0), (2000.25, 4000.5, 0.0), (1999.75, 7999.0, 0.0)]),
+        (r#"{"rows":5,"group":1.0,"unit":"base"}"#, "ETH",
+            vec![(2002.0, 0.0, 3.0), (2001.0, 0.0, 0.5), (2000.0, 3.0, 0.0), (1999.0, 4.0, 0.0)]),
+        (r#"{"rows":5,"group":1.0,"unit":"quote"}"#, "USDT",
+            vec![(2002.0, 0.0, 6004.5), (2001.0, 0.0, 1000.5), (2000.0, 6001.0, 0.0), (1999.0, 7999.0, 0.0)]),
+    ];
+    for (params, unit, want) in &cases {
+        let (u, got) = rows(&mut m, params, &body);
+        assert_eq!((&u[..], &got), (*unit, want), "{params}");
+    }
+    // Statically permitted but too-wide group: recoverable invalid_params.
+    m.destroy();
+    assert_eq!(m.create(br#"{"rows":5,"group":10000.0,"unit":"base"}"#).0, STATUS_OK);
+    let (s, e) = m.invoke(OP_BOOK, &body);
+    assert_eq!(s, STATUS_ERROR);
+    let e: PluginError = serde_json::from_slice(&e).unwrap();
+    assert_eq!(e.code, codes::INVALID_PARAMS);
+    // Recovery by editing params, then source switch (BTC identity).
+    let (_, got) = rows(&mut m, r#"{"rows":5,"group":1.0,"unit":"base"}"#, &body);
+    assert_eq!(got, cases[2].2);
+    let (u, got) = rows(&mut m, r#"{"rows":5,"group":1.0,"unit":"base"}"#, &eth("BTC"));
+    assert_eq!((u.as_str(), got), ("BTC", cases[2].2.clone()));
 }

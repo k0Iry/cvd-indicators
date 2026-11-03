@@ -23,7 +23,7 @@ pub const STATUS_ERROR: i32 = 1;
 pub const STATUS_INVALID_ARGUMENT: i32 = 3;
 
 /// The public allowlist: (cargo package, wasm file, descriptor id).
-pub const PUBLIC: [(&str, &str, &str); 3] = [
+pub const PUBLIC: [(&str, &str, &str); 4] = [
     ("cvd-indicator-cvd", "cvd_indicator_cvd.wasm", "cvd"),
     ("cvd-indicator-flow", "cvd_indicator_flow.wasm", "flow"),
     (
@@ -31,7 +31,14 @@ pub const PUBLIC: [(&str, &str, &str); 3] = [
         "cvd_indicator_example_range.wasm",
         "example.range",
     ),
+    (
+        "cvd-indicator-orderbook",
+        "cvd_indicator_orderbook.wasm",
+        "orderbook",
+    ),
 ];
+/// Order-book operation (`BookSnapshot` body, `PriceLevels` result).
+pub const OP_BOOK: u32 = 4;
 
 /// Directory of the wasm-release artifacts: `CVD_WASM_DIR`, else
 /// `$CARGO_TARGET_DIR|<workspace>/target` + `wasm32-unknown-unknown/wasm-release`.

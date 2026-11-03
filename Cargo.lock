@@ -64,9 +64,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cvd-indicator-orderbook"
+version = "1.0.0"
+dependencies = [
+ "cvd-indicator-sdk",
+]
+
+[[package]]
 name = "cvd-indicator-sdk"
 version = "0.1.0"
-source = "git+https://github.com/k0Iry/cvd-core.git?rev=5e2f2f1a511edc2fdd68248c1995c407e1ab460a#5e2f2f1a511edc2fdd68248c1995c407e1ab460a"
+source = "git+https://github.com/k0Iry/cvd-core.git?rev=d3862d1c2705933d627308d5b9a2cbfffb2afb2a#d3862d1c2705933d627308d5b9a2cbfffb2afb2a"
 dependencies = [
  "serde",
  "serde_json",
