@@ -73,7 +73,7 @@ dependencies = [
 [[package]]
 name = "cvd-indicator-sdk"
 version = "0.1.0"
-source = "git+https://github.com/k0Iry/cvd-core.git?rev=cfe735a6e664baf0bf32300b247bedca0e79af7b#cfe735a6e664baf0bf32300b247bedca0e79af7b"
+source = "git+https://github.com/k0Iry/cvd-core.git?rev=ffcb99ad6e87458d783e641f25eba491e541424b#ffcb99ad6e87458d783e641f25eba491e541424b"
 dependencies = [
  "serde",
  "serde_json",
