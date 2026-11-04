@@ -27,7 +27,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-cvd-indicator-sdk = { git = "https://github.com/k0Iry/cvd-core.git", rev = "cfe735a6e664baf0bf32300b247bedca0e79af7b" }
+cvd-indicator-sdk = { git = "https://github.com/k0Iry/cvd-core.git", rev = "ffcb99ad6e87458d783e641f25eba491e541424b" }
 serde_json = "1.0"
 
 [profile.wasm-release]

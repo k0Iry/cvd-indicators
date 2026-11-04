@@ -6,7 +6,7 @@ browser — no plugin is installed or run on the server.
 
 ## Use
 
-1. Download the current `master` build (the rolling [`dev` pre-release](https://github.com/k0Iry/cvd-indicators/releases/tag/dev)):
+1. Download the latest published `master` build (the rolling [`dev` pre-release](https://github.com/k0Iry/cvd-indicators/releases/tag/dev)):
    - [`cvd_indicator_cvd.wasm`](https://github.com/k0Iry/cvd-indicators/releases/download/dev/cvd_indicator_cvd.wasm) — cumulative volume delta line in its own pane.
    - [`cvd_indicator_flow.wasm`](https://github.com/k0Iry/cvd-indicators/releases/download/dev/cvd_indicator_flow.wasm) — per-bar delta histogram, buy/sell range and total volume.
    - [`cvd_indicator_orderbook.wasm`](https://github.com/k0Iry/cvd-indicators/releases/download/dev/cvd_indicator_orderbook.wasm) — live price ladder for the BTC/ETH spot and perpetual sources the server offers (Binance, Coinbase): rows per side, optional price grouping and base or quote (notional) units. It shows resting displayed liquidity of the selected source only, within the supplied depth (upstream limits apply; unknown beyond it), and hides all levels while the book is syncing or stale.
@@ -21,12 +21,10 @@ Upgrading: deeper book input (up to 5000 levels per side) needs an Order Book
 built against the updated SDK — download/rebuild it and import it again.
 Updating the server alone does not replace the plugin stored in your browser.
 
-`dev` is rebuilt by CI after every push to `master` and swapped as a whole
-complete set; for a few seconds during the swap `dev` links may return 404, so
-retry. Check downloads against `SHA256SUMS`. For a fixed
-version use a formal `vX.Y.Z` tag from the
-[releases page](https://github.com/k0Iry/cvd-indicators/releases) (v0.1.0
-predates Order Book).
+`dev` updates after successful CI if that commit is still the latest on `master`.
+Download links may briefly return 404 during replacement; retry. For a fixed
+version, choose a `vX.Y.Z` tag on the [releases page](https://github.com/k0Iry/cvd-indicators/releases).
+Version v0.1.0 predates Order Book.
 
 `cvd_indicator_example_range.wasm` in the same release is an **author example**
 (rolling high/low midline and range width). Regular users don't need it.
@@ -42,8 +40,10 @@ cargo build --locked --profile wasm-release --target wasm32-unknown-unknown \
 # target/wasm32-unknown-unknown/wasm-release/cvd_indicator_{cvd,flow,orderbook,example_range}.wasm
 ```
 
-Local checks: `scripts/public-gate.sh /tmp/cvd-public-gate`. CI publishes `dev`
-from `master` pushes and formal releases from `vX.Y.Z` tags on `master`.
+Local checks: `scripts/public-gate.sh /tmp/cvd-public-gate` (needs Rust, Node 22
+and `jq`). The real-Chromium smoke runs only when `CVD_WASM_HOST_DIR` points to a
+cvd-core host bundle; set `CVD_REQUIRE_BROWSER=1` to fail instead of skip.
+Formal releases come from `vX.Y.Z` tags on `master`.
 
 To write your own indicator, follow the [authoring guide](docs/authoring.md).
 
