@@ -66,6 +66,7 @@ impl Indicator for Flow {
                 bars: 0,
                 per_tf: Default::default(),
                 periods: Vec::new(),
+                ..ContextSpec::default()
             },
             params: vec![],
             inputs: vec![

@@ -614,6 +614,110 @@ fn orderbook_wasm_numeric_cases() {
     assert_eq!((u.as_str(), got), ("BTC", cases[2].2.clone()));
 }
 
+/// Optional official-tick grouping on the actual .wasm: legacy params/output
+/// identical with or without a host `tick_size`; tick modes without one are a
+/// recoverable `invalid_input` (no fallback width); 1/5/10 give distinct exact
+/// widths; tick+manual together is `invalid_params`; exact/manual repairs it.
+#[test]
+fn orderbook_wasm_tick_group_stage() {
+    let mut m = WasmPlugin::file("cvd_indicator_orderbook.wasm");
+    let plain = book_body(&[[2000.5, 1.0], [1999.75, 4.0]], &[[2001.0, 0.5]]);
+    let mut v: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+    v["tick_size"] = "0.25".into();
+    let ticked = serde_json::to_vec(&v).unwrap();
+    let run = |m: &mut WasmPlugin, params: &[u8], body: &[u8]| {
+        m.destroy();
+        assert_eq!(
+            m.create(params).0,
+            STATUS_OK,
+            "{}",
+            String::from_utf8_lossy(params)
+        );
+        m.invoke(OP_BOOK, body)
+    };
+    for p in [
+        &br#"{"rows":5,"group":1.0,"unit":"base"}"#[..],
+        br#"{"rows":5,"group":0.0}"#,
+    ] {
+        let a = run(&mut m, p, &plain);
+        assert_eq!(a.0, STATUS_OK);
+        assert_eq!(
+            a,
+            run(&mut m, p, &ticked),
+            "unknown tick_size must not change legacy output"
+        );
+    }
+    let (s, e) = run(&mut m, br#"{"rows":5,"ticks":"5"}"#, &plain);
+    assert_eq!(s, STATUS_ERROR);
+    let e: PluginError = serde_json::from_slice(&e).unwrap();
+    assert_eq!(e.code, codes::INVALID_INPUT, "{}", e.message);
+    // Selection switch on the same tick-carrying book: distinct widths
+    // (tick 0.25 -> 0.25 / 1.25 / 2.5), hand-computed bid floor / ask ceil.
+    let prices = |m: &mut WasmPlugin, p: &[u8]| -> Vec<f64> {
+        let (s, out) = run(m, p, &ticked);
+        assert_eq!(s, STATUS_OK, "{}", String::from_utf8_lossy(&out));
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            (v["best_bid"].as_f64(), v["best_ask"].as_f64()),
+            (Some(2000.5), Some(2001.0))
+        );
+        v["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["price"].as_f64().unwrap())
+            .collect()
+    };
+    assert_eq!(
+        prices(&mut m, br#"{"rows":5,"ticks":"1"}"#),
+        vec![2001.0, 2000.5, 1999.75]
+    );
+    assert_eq!(
+        prices(&mut m, br#"{"rows":5,"ticks":"5"}"#),
+        vec![2001.25, 2000.0, 1998.75]
+    );
+    assert_eq!(
+        prices(&mut m, br#"{"rows":5,"ticks":"10"}"#),
+        vec![2002.5, 2000.0, 1997.5]
+    );
+    // absence after presence (source without metadata): unavailable, then repair
+    assert_eq!(
+        run(&mut m, br#"{"rows":5,"ticks":"10"}"#, &plain).0,
+        STATUS_ERROR
+    );
+    assert_eq!(
+        prices(&mut m, br#"{"rows":5,"ticks":"10"}"#),
+        vec![2002.5, 2000.0, 1997.5]
+    );
+    // B-1 regression: ticks take precedence over a stored manual group
+    // (group=1 + ticks=5 -> 5-tick ladder, not a conflict error); a missing
+    // tick never falls back to manual; off restores manual width 1.
+    assert_eq!(
+        prices(&mut m, br#"{"rows":5,"ticks":"5","group":1.0}"#),
+        vec![2001.25, 2000.0, 1998.75]
+    );
+    let (s, e) = run(&mut m, br#"{"rows":5,"ticks":"10","group":1.0}"#, &plain);
+    assert_eq!(s, STATUS_ERROR);
+    assert_eq!(
+        serde_json::from_slice::<PluginError>(&e).unwrap().code,
+        codes::INVALID_INPUT
+    );
+    assert_eq!(
+        prices(&mut m, br#"{"rows":5,"ticks":"off","group":1.0}"#),
+        prices(&mut m, br#"{"rows":5,"group":1.0}"#)
+    );
+    assert_ne!(
+        prices(&mut m, br#"{"rows":5,"ticks":"off","group":1.0}"#),
+        prices(&mut m, br#"{"rows":5,"ticks":"5","group":1.0}"#)
+    );
+    assert_eq!(
+        run(&mut m, br#"{"rows":5,"ticks":"off","group":1.0}"#, &plain).0,
+        STATUS_OK
+    );
+    m.destroy();
+    assert_ne!(m.create(br#"{"ticks":"2"}"#).0, STATUS_OK);
+}
+
 // ------------------------------------------------ UTC-anchored CVD (opt-in)
 
 const MON: i64 = 1_794_787_200; // 2026-11-16 00:00 UTC, Monday

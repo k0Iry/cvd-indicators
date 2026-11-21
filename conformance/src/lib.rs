@@ -480,6 +480,7 @@ pub fn corpus() -> Vec<Case> {
         }
     }
     out.extend(anchored_cases());
+    out.extend(orderbook_cases());
     out
 }
 
@@ -535,6 +536,85 @@ pub fn period_refs(
 /// Exact-time lookup in a canonical bar set.
 pub fn canon(bars: &[InputBar]) -> impl Fn(i64) -> Option<InputBar> + '_ {
     move |t| bars.iter().find(|b| b.time == t).cloned()
+}
+
+/// Order-book plugin through `OP_BOOK`: exact, manual group and the optional
+/// official-tick modes, each over the same books with and without a
+/// host-supplied exact-decimal `tick_size` and across a BTC -> ETH source
+/// switch. Expectations are whatever the real .wasm returns under the Rust
+/// harness; the browser smoke must reproduce them bit-for-bit. Without a
+/// `tick_size` tick modes are a recoverable `invalid_input`; with one they
+/// yield distinct 1/5/10 widths.
+fn orderbook_cases() -> Vec<Case> {
+    let (package, wasm, _) = PUBLIC[4];
+    // Mirror the host's projection rule: `tick_size` reaches only a module
+    // whose descriptor declares `context.book: ["tick_size"]`. A pre-tick
+    // module (old plugin on a new host) gets the exact old bodies.
+    let declared = {
+        let mut m = WasmPlugin::load(&wasm_bytes(wasm));
+        let d: serde_json::Value = serde_json::from_slice(&m.describe().1).unwrap();
+        d["context"]["book"]
+            .as_array()
+            .is_some_and(|b| b.iter().any(|f| f == "tick_size"))
+    };
+    let body = |sym: &str, tick: Option<&str>, bids: &[[f64; 2]], asks: &[[f64; 2]]| {
+        let tick = tick.filter(|_| declared);
+        let mut v = serde_json::json!({
+            "source": {"exchange": "binance", "market": "usdm", "symbol": sym},
+            "base": sym, "quote": "USDT", "generation": 1, "seq": 1, "exchange_time_ms": 1_700_000_000_000i64,
+            "bids": bids, "asks": asks,
+            "coverage": {"bid_floor": bids[bids.len() - 1][0], "ask_ceiling": asks[asks.len() - 1][0]}
+        });
+        if let Some(t) = tick {
+            v["tick_size"] = t.into();
+        }
+        Step {
+            label: format!("book.{sym}.{}", tick.unwrap_or("none")),
+            op: OP_BOOK,
+            body: v.to_string(),
+        }
+    };
+    let btc = |t| {
+        body(
+            "BTC",
+            t,
+            &[[95_000.4, 1.0], [94_999.7, 2.0], [94_998.1, 3.0]],
+            &[[95_000.5, 0.5], [95_001.3, 4.0]],
+        )
+    };
+    let eth = |t| {
+        body(
+            "ETH",
+            t,
+            &[[3_000.37, 1.0], [3_000.21, 2.0], [2_999.95, 3.0]],
+            &[[3_000.38, 0.5], [3_000.61, 4.0]],
+        )
+    };
+    let params = [
+        r#"{"rows":5}"#,
+        r#"{"rows":5,"group":1.0,"unit":"quote"}"#,
+        r#"{"rows":5,"ticks":"1"}"#,
+        r#"{"rows":5,"ticks":"5"}"#,
+        r#"{"rows":5,"ticks":"10","unit":"quote"}"#,
+        r#"{"rows":5,"ticks":"5","group":1.0}"#,
+        r#"{"rows":5,"ticks":"off","group":1.0}"#,
+    ];
+    params
+        .iter()
+        .map(|p| Case {
+            name: format!("orderbook {p}"),
+            package,
+            wasm,
+            params: (*p).into(),
+            steps: vec![
+                btc(Some("0.1")),
+                btc(None),
+                eth(Some("0.01")),
+                eth(None),
+                btc(Some("0.1")),
+            ],
+        })
+        .collect()
 }
 
 /// UTC-anchored CVD with host period references: 1m day (history + live

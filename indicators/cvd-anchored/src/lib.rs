@@ -30,7 +30,7 @@ pub const WEEK: i64 = 7 * DAY;
 
 /// Zero warm-up; both UTC period references.
 pub fn context() -> ContextSpec {
-    ContextSpec { bars: 0, per_tf: BTreeMap::new(), periods: vec![PeriodKind::UtcDay, PeriodKind::UtcWeek] }
+    ContextSpec { bars: 0, per_tf: BTreeMap::new(), periods: vec![PeriodKind::UtcDay, PeriodKind::UtcWeek], ..ContextSpec::default() }
 }
 
 /// Anchored values for `bars[from..]`; `cum(b)` = the scope's cumulative.

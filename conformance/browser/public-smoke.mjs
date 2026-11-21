@@ -163,7 +163,8 @@ corpus.cases.forEach((c, ci) => {
     }
   })
   assert.equal(got.disabled, 'stale', `${c.name}: compute after disable`)
-  assert.equal(got.reloaded, got.steps[0].text, `${c.name}: reload recomputes identically`)
+  const g0 = got.steps[0]
+  assert.equal(got.reloaded, g0.ok ? g0.text : 'ERR ' + g0.code, `${c.name}: reload recomputes identically`)
 })
 assert.deepEqual(external, [], 'no non-loopback network requests')
 console.log(`PUBLIC BROWSER SMOKE PASS: ${corpus.cases.length} cases, ${okSteps} outputs (${textIdentical} byte-identical text), ${numbers} numeric values bit-identical, ${errSteps} rejections matched, 0 external requests`)
