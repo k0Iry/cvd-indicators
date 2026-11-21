@@ -246,6 +246,7 @@ fn permissions_and_assets_are_bounded() {
     // explicit allowlist, never a directory/glob
     for a in [
         "cvd_indicator_cvd.wasm",
+        "cvd_indicator_cvd_anchored.wasm",
         "cvd_indicator_flow.wasm",
         "cvd_indicator_example_range.wasm",
         "manifest.json",

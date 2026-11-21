@@ -27,7 +27,7 @@ DIST="$(cd "${1:?usage: publish-dev.sh <DIST_DIR>}" && pwd)"
 R="repos/$GITHUB_REPOSITORY"
 TAG=dev
 STAGE="dev-staging-$GITHUB_SHA"
-WASM=(cvd_indicator_cvd.wasm cvd_indicator_example_range.wasm cvd_indicator_flow.wasm cvd_indicator_orderbook.wasm)
+WASM=(cvd_indicator_cvd.wasm cvd_indicator_cvd_anchored.wasm cvd_indicator_example_range.wasm cvd_indicator_flow.wasm cvd_indicator_orderbook.wasm)
 SET="SHA256SUMS ${WASM[*]} manifest.json"
 LOCK_SDK=$(awk '$0=="name = \"cvd-indicator-sdk\""{f=1;next} f&&/^source = /{gsub(/^source = "|"$/,"");print;exit}' Cargo.lock)
 [[ "$LOCK_SDK" =~ ^git\+https://github\.com/k0Iry/cvd-core\.git\?rev=[0-9a-f]{40}#[0-9a-f]{40}$ ]] || { echo "unexpected SDK pin '$LOCK_SDK'" >&2; exit 1; }

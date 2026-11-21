@@ -35,6 +35,7 @@ impl Indicator for Range {
             context: ContextSpec {
                 bars: MAX_LENGTH as u32,
                 per_tf: Default::default(),
+                periods: Vec::new(),
             },
             params: vec![
                 ParamSpec {

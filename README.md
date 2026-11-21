@@ -8,8 +8,9 @@ browser — no plugin is installed or run on the server.
 
 1. Download the latest published `master` build (the rolling [`dev` pre-release](https://github.com/k0Iry/cvd-indicators/releases/tag/dev)):
    - [`cvd_indicator_cvd.wasm`](https://github.com/k0Iry/cvd-indicators/releases/download/dev/cvd_indicator_cvd.wasm) — cumulative volume delta line in its own pane.
+   - [`cvd_indicator_cvd_anchored.wasm`](https://github.com/k0Iry/cvd-indicators/releases/download/dev/cvd_indicator_cvd_anchored.wasm) — optional companion: CVD since the UTC day or week start (Monday 00:00 UTC), `cum(bar) − cum(boundary)`, where the boundary value is the host-supplied period reference (`context.periods`): the same scope's established cumulative (source `cvd_usdt` / aggregate `ac`) of the exact canonical bar ending at `start − 1`. No warm-up, so `utc_week` works on every timeframe including 1m (one boundary lookup per period, never a week of bars). If the boundary bar is absent, invalid or unknown, the period stays empty (never 0, never inferred from an earlier bar); an unavailable lookup leaves the indicator waiting rather than showing a guess. Requires a cvd-core host with period references. The plain CVD line is unchanged.
    - [`cvd_indicator_flow.wasm`](https://github.com/k0Iry/cvd-indicators/releases/download/dev/cvd_indicator_flow.wasm) — per-bar delta histogram, buy/sell range and total volume.
-   - [`cvd_indicator_orderbook.wasm`](https://github.com/k0Iry/cvd-indicators/releases/download/dev/cvd_indicator_orderbook.wasm) — live price ladder for the BTC/ETH spot and perpetual sources the server offers (Binance, Coinbase): rows per side, optional price grouping and base or quote (notional) units. It shows resting displayed liquidity of the selected source only, within the supplied depth (upstream limits apply; unknown beyond it), and hides all levels while the book is syncing or stale.
+   - [`cvd_indicator_orderbook.wasm`](https://github.com/k0Iry/cvd-indicators/releases/download/dev/cvd_indicator_orderbook.wasm) — live price ladder for the BTC/ETH spot and perpetual sources the server offers (Binance, Coinbase): rows per side, optional price grouping (exact decimal buckets: bids round down, asks up) and base or quote (notional) units. It shows resting displayed liquidity of the selected source only, within the supplied depth (upstream limits apply; unknown beyond it), and hides all levels while the book is syncing or stale.
 2. Optional: compare the downloaded files with [`SHA256SUMS`](https://github.com/k0Iry/cvd-indicators/releases/download/dev/SHA256SUMS); [`manifest.json`](https://github.com/k0Iry/cvd-indicators/releases/download/dev/manifest.json) names the source commit.
 3. In the chart click **Indicators → Import**, choose the file, then enable it.
 
@@ -36,8 +37,8 @@ public SDK pinned in `Cargo.toml`. To build this repository's modules:
 
 ```sh
 cargo build --locked --profile wasm-release --target wasm32-unknown-unknown \
-  -p cvd-indicator-cvd -p cvd-indicator-flow -p cvd-indicator-orderbook -p cvd-indicator-example-range
-# target/wasm32-unknown-unknown/wasm-release/cvd_indicator_{cvd,flow,orderbook,example_range}.wasm
+  -p cvd-indicator-cvd -p cvd-indicator-cvd-anchored -p cvd-indicator-flow -p cvd-indicator-orderbook -p cvd-indicator-example-range
+# target/wasm32-unknown-unknown/wasm-release/cvd_indicator_{cvd,cvd_anchored,flow,orderbook,example_range}.wasm
 ```
 
 Local checks: `scripts/public-gate.sh /tmp/cvd-public-gate` (needs Rust, Node 22

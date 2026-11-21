@@ -67,6 +67,7 @@ jobs:
           if-no-files-found: error
           path: |
             ${{ runner.temp }}/gate/dist/cvd_indicator_cvd.wasm
+            ${{ runner.temp }}/gate/dist/cvd_indicator_cvd_anchored.wasm
             ${{ runner.temp }}/gate/dist/cvd_indicator_flow.wasm
             ${{ runner.temp }}/gate/dist/cvd_indicator_example_range.wasm
             ${{ runner.temp }}/gate/dist/cvd_indicator_orderbook.wasm
@@ -130,7 +131,7 @@ jobs:
           SDK=$(awk '$0=="name = \"cvd-indicator-sdk\""{f=1;next} f&&/^source = /{gsub(/^source = "|"$/,"");print;exit}' Cargo.lock)
           [[ "$SDK" =~ ^git\+https://github\.com/k0Iry/cvd-core\.git\?rev=[0-9a-f]{40}#[0-9a-f]{40}$ ]]
           cd dist
-          test "$(ls | sort | tr '\n' ' ')" = "SHA256SUMS cvd_indicator_cvd.wasm cvd_indicator_example_range.wasm cvd_indicator_flow.wasm cvd_indicator_orderbook.wasm manifest.json "
+          test "$(ls | sort | tr '\n' ' ')" = "SHA256SUMS cvd_indicator_cvd.wasm cvd_indicator_cvd_anchored.wasm cvd_indicator_example_range.wasm cvd_indicator_flow.wasm cvd_indicator_orderbook.wasm manifest.json "
           sha256sum -c SHA256SUMS
           jq -e --arg t "$GITHUB_REF_NAME" --arg c "$GITHUB_SHA" '.release == $t and .source == {commit: $c} and .sdk.source == $s' --arg s "$SDK" manifest.json
       - name: Publish explicit assets
@@ -138,5 +139,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
-            --notes "Public cvd-wasm v1 indicator modules (CVD, Flow, example.range, Order Book). Import the .wasm locally in the CVD browser; verify against SHA256SUMS / manifest.json." \
-            dist/cvd_indicator_cvd.wasm dist/cvd_indicator_flow.wasm dist/cvd_indicator_example_range.wasm dist/cvd_indicator_orderbook.wasm dist/manifest.json dist/SHA256SUMS
+            --notes "Public cvd-wasm v1 indicator modules (CVD, CVD UTC reset, Flow, example.range, Order Book). Import the .wasm locally in the CVD browser; verify against SHA256SUMS / manifest.json." \
+            dist/cvd_indicator_cvd.wasm dist/cvd_indicator_cvd_anchored.wasm dist/cvd_indicator_flow.wasm dist/cvd_indicator_example_range.wasm dist/cvd_indicator_orderbook.wasm dist/manifest.json dist/SHA256SUMS

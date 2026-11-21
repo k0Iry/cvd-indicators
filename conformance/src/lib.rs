@@ -10,7 +10,10 @@
 
 pub mod dist;
 
-use cvd_indicator_sdk::{HistoryRequest, InputBar, LiveInit, LiveOp, LiveUpdate, Mode, Scope};
+use cvd_indicator_sdk::{
+    bar_period_start, tf_seconds, HistoryRequest, InputBar, LiveInit, LiveOp, LiveUpdate, Mode,
+    PeriodBaseline, PeriodKind, Scope,
+};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use wasmi::{Engine, Instance, Linker, Memory, Module, Store, TypedFunc};
@@ -23,8 +26,13 @@ pub const STATUS_ERROR: i32 = 1;
 pub const STATUS_INVALID_ARGUMENT: i32 = 3;
 
 /// The public allowlist: (cargo package, wasm file, descriptor id).
-pub const PUBLIC: [(&str, &str, &str); 4] = [
+pub const PUBLIC: [(&str, &str, &str); 5] = [
     ("cvd-indicator-cvd", "cvd_indicator_cvd.wasm", "cvd"),
+    (
+        "cvd-indicator-cvd-anchored",
+        "cvd_indicator_cvd_anchored.wasm",
+        "cvd_anchored",
+    ),
     ("cvd-indicator-flow", "cvd_indicator_flow.wasm", "flow"),
     (
         "cvd-indicator-example-range",
@@ -292,6 +300,7 @@ fn hist(label: &str, mode: Mode, from: usize, bars: &[InputBar], rev: u64) -> St
         revision: rev,
         output_from: from,
         bars: bars.to_vec(),
+        periods: None,
     })
     .unwrap();
     Step {
@@ -305,6 +314,7 @@ fn init(label: &str, mode: Mode, bars: &[InputBar], rev: u64) -> Step {
         scope: scope(mode),
         revision: rev,
         bars: bars.to_vec(),
+        periods: None,
     })
     .unwrap();
     Step {
@@ -318,6 +328,7 @@ fn upd(label: &str, rev: u64, seq: u64, ops: Vec<LiveOp>) -> Step {
         revision: rev,
         seq,
         ops,
+        periods: None,
     })
     .unwrap();
     Step {
@@ -333,11 +344,20 @@ fn upd(label: &str, rev: u64, seq: u64, ops: Vec<LiveOp>) -> Step {
 /// and stateless history interleaved with the live session.
 pub fn corpus() -> Vec<Case> {
     let mut out = Vec::new();
-    let sets: [(usize, &[&str]); 3] = [
+    let sets: [(usize, &[&str]); 4] = [
         (0, &["{}"]),
-        (1, &["", "{}"]),
         (
-            2,
+            1,
+            &[
+                // The generic script carries no `periods`, which a
+                // periods-declaring plugin rejects (host capability). Real
+                // values + that rejection: see anchored_cases().
+                r#"{"anchor":"none"}"#,
+            ],
+        ),
+        (2, &["", "{}"]),
+        (
+            3,
             &[
                 r#"{"length":5}"#,
                 r#"{"length":5,"source":"close"}"#,
@@ -459,7 +479,136 @@ pub fn corpus() -> Vec<Case> {
             });
         }
     }
+    out.extend(anchored_cases());
     out
+}
+
+/// Bars with canonical-bucket times (last second of each `secs` bucket from
+/// `t0`) whose cumulatives are continuous with their deltas (host rule
+/// `cum += delta`), so the UTC-anchored plugin produces real values.
+pub fn continuous_bars(t0: i64, secs: i64, n: i64) -> Vec<InputBar> {
+    let (mut c, mut a) = (1_000_000.0, -2_000_000.0);
+    (0..n)
+        .map(|i| {
+            let mut b = bar(i);
+            b.time = t0 + secs * i + secs - 1;
+            c += b.delta_usdt;
+            a += b.ad;
+            b.cvd_usdt = c;
+            b.ac = a;
+            b
+        })
+        .collect()
+}
+
+pub fn scope_tf(mode: Mode, tf: &str) -> Scope {
+    Scope { tf: tf.into(), ..scope(mode) }
+}
+
+/// Host-equivalent boundary references (both declared kinds) covering
+/// `out`: `value` = the scope's cumulative (`cvd_usdt` / aggregate `ac`) of the
+/// EXACT canonical bar at `start - 1` as returned by `lookup`, else `null`.
+/// Mirrors the coordinator: one reference per touched period, never an
+/// earlier bar.
+pub fn period_refs(
+    tf: &str,
+    mode: Mode,
+    out: &[InputBar],
+    lookup: impl Fn(i64) -> Option<InputBar>,
+) -> Vec<PeriodBaseline> {
+    let tfs = tf_seconds(tf).expect("canonical tf");
+    let mut keys: Vec<(PeriodKind, i64)> = [PeriodKind::UtcDay, PeriodKind::UtcWeek]
+        .iter()
+        .flat_map(|&k| out.iter().map(move |b| (k, bar_period_start(k, tfs, b.time))))
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys.into_iter()
+        .map(|(kind, start)| PeriodBaseline {
+            kind,
+            start,
+            value: lookup(start - 1).map(|b| if mode == Mode::Aggregate { b.ac } else { b.cvd_usdt }),
+        })
+        .collect()
+}
+
+/// Exact-time lookup in a canonical bar set.
+pub fn canon(bars: &[InputBar]) -> impl Fn(i64) -> Option<InputBar> + '_ {
+    move |t| bars.iter().find(|b| b.time == t).cloned()
+}
+
+/// UTC-anchored CVD with host period references: 1m day (history + live
+/// append/replace across midnight; known nonzero, exact zero, missing
+/// boundary -> null), late-Sunday 1m week + next Monday reset (no week of
+/// bars), aggregate scope, and requests lacking references (rejected).
+fn anchored_cases() -> Vec<Case> {
+    const MON: i64 = 1_794_787_200; // 2026-11-16 00:00 UTC
+    const WEEK: i64 = 7 * 86_400;
+    let (package, wasm, _) = PUBLIC[1];
+    let h = |label: &str, tf: &str, mode: Mode, from: usize, bars: &[InputBar], lk: &dyn Fn(i64) -> Option<InputBar>| {
+        let mut s = hist(label, mode, from, bars, 1);
+        let periods = Some(period_refs(tf, mode, &bars[from.min(bars.len())..], lk));
+        s.body = serde_json::to_string(&HistoryRequest { scope: scope_tf(mode, tf), revision: 1, output_from: from, bars: bars.to_vec(), periods }).unwrap();
+        s
+    };
+    let day = continuous_bars(MON - 30 * 60, 60, 60); // 23:30 Sun .. 00:29 Mon
+    let mut gap = day.clone();
+    gap.remove(29); // boundary bar 23:59 absent/unknown -> Monday null
+    let mut zero = day.clone();
+    zero[40].cvd_usdt = day[29].cvd_usdt; // exactly back at the boundary cumulative
+    zero[41].ac = day[29].ac;
+    let mut steps = vec![
+        h("anchored.day.source", "1m", Mode::Source, 0, &day, &canon(&day)),
+        h("anchored.day.aggregate.from20", "1m", Mode::Aggregate, 20, &day, &canon(&day)),
+        h("anchored.day.missing_boundary", "1m", Mode::Source, 0, &gap, &canon(&gap)),
+        h("anchored.day.exact_zero.source", "1m", Mode::Source, 30, &zero, &canon(&zero)),
+        h("anchored.day.exact_zero.aggregate", "1m", Mode::Aggregate, 30, &zero, &canon(&zero)),
+        hist("anchored.day.no_periods_rejected", Mode::Source, 0, &day, 1),
+    ];
+    let mut li = init("anchored.live.init", Mode::Source, &day[..50], 5);
+    li.body = serde_json::to_string(&LiveInit {
+        scope: scope_tf(Mode::Source, "1m"),
+        revision: 5,
+        bars: day[..50].to_vec(),
+        periods: Some(period_refs("1m", Mode::Source, &day[49..50], canon(&day))),
+    })
+    .unwrap();
+    steps.push(li);
+    let mut next = day[50].clone();
+    let lu = |label: &str, seq: u64, op: LiveOp, b: &InputBar| {
+        let mut s = upd(label, 5, seq, vec![op]);
+        s.body = serde_json::to_string(&LiveUpdate {
+            revision: 5,
+            seq,
+            ops: s_ops(&s.body),
+            periods: Some(period_refs("1m", Mode::Source, std::slice::from_ref(b), canon(&day))),
+        })
+        .unwrap();
+        s
+    };
+    steps.push(lu("anchored.live.append", 1, LiveOp::Append { bar: next.clone() }, &next));
+    next.cvd_usdt += 7.0;
+    next.delta_usdt += 7.0;
+    steps.push(lu("anchored.live.replace", 2, LiveOp::Replace { bar: next.clone() }, &next));
+    // Late Sunday 1m: only the last 30 minutes of the week are supplied; the
+    // week reference (Monday 00:00 boundary, a week earlier) comes from the
+    // host, not from 10080 bars of warm-up.
+    let late = continuous_bars(MON + WEEK - 30 * 60, 60, 40); // Sun 23:30 .. next Mon 00:09
+    let week_base = InputBar { time: MON - 1, cvd_usdt: 777_000.5, ac: -1_234_567.25, ..Default::default() };
+    let lk_week = |t: i64| if t == MON - 1 { Some(week_base.clone()) } else { canon(&late)(t) };
+    let week_cases = vec![
+        h("anchored.week1m.late_sunday.source", "1m", Mode::Source, 0, &late, &lk_week),
+        h("anchored.week1m.late_sunday.aggregate", "1m", Mode::Aggregate, 0, &late, &lk_week),
+        h("anchored.week1m.missing_week_ref", "1m", Mode::Source, 0, &late, &canon(&late)),
+    ];
+    vec![
+        Case { name: "cvd_anchored:day-periods".into(), package, wasm, params: r#"{"anchor":"utc_day"}"#.into(), steps },
+        Case { name: "cvd_anchored:week-periods".into(), package, wasm, params: r#"{"anchor":"utc_week"}"#.into(), steps: week_cases },
+    ]
+}
+
+fn s_ops(body: &str) -> Vec<LiveOp> {
+    serde_json::from_str::<LiveUpdate>(body).expect("upd body").ops
 }
 
 /// Outcome of one call: status + raw result-slot bytes (UTF-8 JSON).

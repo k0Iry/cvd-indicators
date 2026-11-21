@@ -20,25 +20,54 @@ pub struct OrderBook {
     quote: bool,
 }
 
-fn round8(x: f64) -> f64 {
-    (x * 1e8).round() / 1e8
+/// A finite positive f64 as the decimal it was written as: the shortest
+/// round-trip representation (Rust `Display`), i.e. `mantissa × 10^-scale`.
+/// Exchange prices and user groups are decimal strings parsed to the nearest
+/// binary64, so this recovers the intended decimal exactly, with no epsilon.
+/// `None` beyond i128 precision.
+fn decimal(x: f64) -> Option<(i128, u32)> {
+    let s = format!("{x}");
+    let (int, frac) = s.split_once('.').unwrap_or((&s, ""));
+    let scale = u32::try_from(frac.len()).ok()?;
+    let mut m: i128 = 0;
+    for c in int.bytes().chain(frac.bytes()) {
+        let d = c.checked_sub(b'0').filter(|d| *d <= 9)?;
+        m = m.checked_mul(10)?.checked_add(i128::from(d))?;
+    }
+    Some((m, scale))
+}
+
+/// Exact integer grouping of decimal `price` into the decimal `group`
+/// (`(mantissa, scale)`): bids floor, asks ceil; the bucket decimal is then
+/// converted once to its nearest binary64. `None` beyond i128 precision.
+fn bucket(price: f64, (gm, gs): (i128, u32), ask: bool) -> Option<f64> {
+    let (pm, ps) = decimal(price)?;
+    let s = ps.max(gs);
+    let pm = pm.checked_mul(10i128.checked_pow(s - ps)?)?;
+    let ga = gm.checked_mul(10i128.checked_pow(s - gs)?)?;
+    let (q, r) = (pm / ga, pm % ga);
+    let k = if ask && r != 0 { q + 1 } else { q };
+    format!("{}e-{gs}", k.checked_mul(gm)?).parse().ok()
 }
 
 /// Grouped `(price -> qty)` for one side; bids floor, asks ceil.
 fn side(
     levels: &[[f64; 2]],
-    group: f64,
+    group: Option<(i128, u32)>,
     ask: bool,
     quote: bool,
     rows: usize,
 ) -> Result<BTreeMap<u64, (f64, f64)>, PluginError> {
     let mut out: BTreeMap<u64, (f64, f64)> = BTreeMap::new();
     for l in levels {
-        let p = if group > 0.0 {
-            let k = l[0] / group;
-            round8(if ask { k.ceil() } else { k.floor() } * group)
-        } else {
-            l[0]
+        let p = match group {
+            Some(g) => bucket(l[0], g, ask).ok_or_else(|| {
+                PluginError::new(
+                    codes::INVALID_PARAMS,
+                    "price group is too fine for these prices; choose a coarser group",
+                )
+            })?,
+            None => l[0],
         };
         if p.is_nan() || p <= 0.0 {
             // A bid bucket would start at price 0: the group is wider than the
@@ -59,6 +88,13 @@ fn side(
 }
 
 pub fn ladder(book: &BookSnapshot, rows: usize, group: f64, quote: bool) -> Result<PriceLevels, PluginError> {
+    let group = if group > 0.0 {
+        Some(decimal(group).ok_or_else(|| {
+            PluginError::new(codes::INVALID_PARAMS, "price group is too fine; choose a coarser group")
+        })?)
+    } else {
+        None
+    };
     let mut merged: BTreeMap<u64, PriceLevelRow> = BTreeMap::new();
     for (ask, levels) in [(false, &book.bids), (true, &book.asks)] {
         for (_, (p, q)) in side(levels, group, ask, quote, rows)? {
@@ -267,5 +303,75 @@ mod tests {
         let d = OrderBook::descriptor();
         d.validate().unwrap();
         assert!(d.is_book());
+    }
+
+    fn one(bid: f64, ask: f64) -> BookSnapshot {
+        BookSnapshot {
+            bids: vec![[bid, 1.0]],
+            asks: vec![[ask, 2.0]],
+            coverage: BookCoverage { bid_floor: bid, ask_ceiling: ask },
+            ..book()
+        }
+    }
+
+    /// (bid bucket, bid qty, ask bucket, ask qty) of a one-level-per-side book.
+    fn sides(o: &PriceLevels) -> (f64, f64, f64, f64) {
+        let b = o.rows.iter().find(|r| r.bid > 0.0).unwrap();
+        let a = o.rows.iter().find(|r| r.ask > 0.0).unwrap();
+        (b.price, b.bid, a.price, a.ask)
+    }
+
+    /// Decimal boundaries whose binary64 quotient misrounds (0.29/0.01 =
+    /// 28.999999999999996 would floor to 0.28; 0.07/0.01 = 7.000000000000001
+    /// would ceil to 0.08) stay in their own bucket. The adjacent binary64
+    /// values are distinct prices and group strictly by their exact value.
+    #[test]
+    fn exact_decimal_boundaries_and_strict_neighbours() {
+        let down = |x: f64| f64::from_bits(x.to_bits() - 1);
+        let up = |x: f64| f64::from_bits(x.to_bits() + 1);
+        assert_eq!(0.29f64 / 0.01, 28.999999999999996);
+        assert_eq!(0.07f64 / 0.01, 7.000000000000001);
+        let cases = [
+            // (bid, ask) -> (bid bucket, ask bucket) at group 0.01
+            ((0.29, 0.07), (0.29, 0.07)),
+            ((0.01, 0.01), (0.01, 0.01)),
+            ((up(0.29), down(0.07)), (0.29, 0.07)),
+            ((down(0.29), up(0.07)), (0.28, 0.08)),
+            ((up(0.01), down(0.01)), (0.01, 0.01)),
+        ];
+        for ((bid, ask), (wb, wa)) in cases {
+            let b = one(bid, ask);
+            let o = ladder(&b, 5, 0.01, false).unwrap();
+            o.validate(&b).unwrap();
+            assert_eq!(sides(&o), (wb, 1.0, wa, 2.0), "bid {bid:?} ask {ask:?}");
+            assert_eq!((o.best_bid.to_bits(), o.best_ask.to_bits()), (bid.to_bits(), ask.to_bits()));
+        }
+        // just below the 0.01 bid bucket floors to 0: recoverable, never dropped
+        let e = ladder(&one(down(0.01), 0.07), 5, 0.01, false).unwrap_err();
+        assert_eq!(e.code, codes::INVALID_PARAMS);
+        // same boundaries in quote units: bucket unchanged, notional exact
+        let o = ladder(&one(0.29, 0.07), 5, 0.01, true).unwrap();
+        assert_eq!(sides(&o), (0.29, 0.29, 0.07, 0.14));
+    }
+
+    /// No eight-decimal merge: prices differing below 1e-8 stay distinct both
+    /// exact and grouped at a finer group.
+    #[test]
+    fn sub_eight_decimal_prices_are_not_merged() {
+        let b = one(0.123456781, 0.123456789);
+        let o = ladder(&b, 5, 0.000000001, false).unwrap();
+        o.validate(&b).unwrap();
+        assert_eq!(sides(&o), (0.123456781, 1.0, 0.123456789, 2.0));
+        let o = ladder(&b, 5, 0.0, false).unwrap();
+        assert_eq!(sides(&o), (0.123456781, 1.0, 0.123456789, 2.0));
+    }
+
+    /// Precision beyond i128 is a recoverable params error, not a wrong bucket.
+    #[test]
+    fn unrepresentable_precision_is_recoverable() {
+        assert_eq!(decimal(0.29), Some((29, 2)));
+        assert_eq!(decimal(1e300), None);
+        let e = ladder(&one(1e-30, 1.0), 5, 3e-30, false).unwrap_err();
+        assert_eq!(e.code, codes::INVALID_PARAMS);
     }
 }

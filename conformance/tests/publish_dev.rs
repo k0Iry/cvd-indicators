@@ -8,8 +8,9 @@ use std::process::Command;
 const SHA: &str = "1111111111111111111111111111111111111111";
 const OLD: &str = "0000000000000000000000000000000000000000";
 const STABLE: &str = "2222222222222222222222222222222222222222";
-const WASM: [&str; 4] = [
+const WASM: [&str; 5] = [
     "cvd_indicator_cvd.wasm",
+    "cvd_indicator_cvd_anchored.wasm",
     "cvd_indicator_example_range.wasm",
     "cvd_indicator_flow.wasm",
     "cvd_indicator_orderbook.wasm",

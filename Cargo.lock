@@ -50,6 +50,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cvd-indicator-cvd-anchored"
+version = "1.0.0"
+dependencies = [
+ "cvd-indicator-sdk",
+]
+
+[[package]]
 name = "cvd-indicator-example-range"
 version = "0.1.0"
 dependencies = [
@@ -73,7 +80,7 @@ dependencies = [
 [[package]]
 name = "cvd-indicator-sdk"
 version = "0.1.0"
-source = "git+https://github.com/k0Iry/cvd-core.git?rev=ffcb99ad6e87458d783e641f25eba491e541424b#ffcb99ad6e87458d783e641f25eba491e541424b"
+source = "git+https://github.com/k0Iry/cvd-core.git?rev=c3383ed94e62dc5df8bfed7b08bd79949b7cb808#c3383ed94e62dc5df8bfed7b08bd79949b7cb808"
 dependencies = [
  "serde",
  "serde_json",

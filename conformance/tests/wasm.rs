@@ -4,7 +4,7 @@
 //! Build artifacts first (README: Testing). Data is synthetic loopback input.
 
 use cvd_indicator_sdk::{
-    codes, Descriptor, HistoryRequest, InputBar, LiveInit, LiveOp, LiveUpdate, Mode, Output,
+    codes, Descriptor, HistoryRequest, PeriodBaseline, PeriodKind, InputBar, LiveInit, LiveOp, LiveUpdate, Mode, Output,
     OutputKind, Pane, PluginError, SeriesValues,
 };
 use cvd_indicators_conformance::*;
@@ -13,6 +13,9 @@ struct P {
     m: WasmPlugin,
     d: Descriptor,
     desc_json: Vec<u8>,
+    /// Live session mode + canonical bars seen (host-equivalent period refs).
+    live_mode: Mode,
+    seen: Vec<InputBar>,
 }
 
 impl P {
@@ -27,7 +30,22 @@ impl P {
             assert_eq!(s, STATUS_ERROR);
             return Err(serde_json::from_slice(&b).unwrap());
         }
-        Ok(Self { m, d, desc_json })
+        Ok(Self { m, d, desc_json, live_mode: Mode::Source, seen: Vec::new() })
+    }
+    /// Period references as the host supplies them: only for a
+    /// periods-declaring descriptor, from the exact canonical bars known.
+    fn refs(&mut self, mode: Mode, out: &[InputBar], known: &[InputBar]) -> Option<Vec<PeriodBaseline>> {
+        for b in known {
+            match self.seen.iter_mut().find(|x| x.time == b.time) {
+                Some(x) => *x = b.clone(),
+                None => self.seen.push(b.clone()),
+            }
+        }
+        if self.d.context.periods.is_empty() {
+            return None;
+        }
+        let seen = self.seen.clone();
+        Some(period_refs(&scope(mode).tf, mode, out, canon(&seen)))
     }
     fn call(&mut self, op: u32, body: Vec<u8>) -> Result<Output, PluginError> {
         match self.m.invoke(op, &body) {
@@ -42,11 +60,13 @@ impl P {
         from: usize,
         bars: &[InputBar],
     ) -> Result<Output, PluginError> {
+        let periods = self.refs(mode, &bars[from.min(bars.len())..], bars);
         let b = serde_json::to_vec(&HistoryRequest {
             scope: scope(mode),
             revision: 1,
             output_from: from,
             bars: bars.to_vec(),
+            periods,
         })
         .unwrap();
         self.call(OP_HISTORY, b)
@@ -57,19 +77,25 @@ impl P {
         mode: Mode,
         bars: &[InputBar],
     ) -> Result<Output, PluginError> {
+        self.live_mode = mode;
+        let periods = self.refs(mode, &bars[bars.len().saturating_sub(1)..], bars);
         let b = serde_json::to_vec(&LiveInit {
             scope: scope(mode),
             revision: rev,
             bars: bars.to_vec(),
+            periods,
         })
         .unwrap();
         self.call(OP_LIVE_INIT, b)
     }
     fn live_update(&mut self, rev: u64, seq: u64, ops: Vec<LiveOp>) -> Result<Output, PluginError> {
+        let obs: Vec<InputBar> = ops.iter().map(|o| match o { LiveOp::Append { bar } | LiveOp::Replace { bar } => bar.clone() }).collect();
+        let periods = self.refs(self.live_mode, &obs, &obs);
         let b = serde_json::to_vec(&LiveUpdate {
             revision: rev,
             seq,
             ops,
+            periods,
         })
         .unwrap();
         self.call(OP_LIVE_UPDATE, b)
@@ -350,6 +376,7 @@ fn flow_conformance_scopes_reconciliation_and_zero() {
         revision: 1,
         output_from: 0,
         bars: input.clone(),
+        periods: None,
     };
     let (_, raw) = r.m.invoke(OP_HISTORY, &serde_json::to_vec(&req).unwrap());
     let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
@@ -465,7 +492,7 @@ fn libraries_export_distinct_ids_and_only_public_inputs() {
     }
     ids.sort();
     ids.dedup();
-    assert_eq!(ids.len(), 4);
+    assert_eq!(ids.len(), 5);
 }
 
 fn book_body(bids: &[[f64; 2]], asks: &[[f64; 2]]) -> Vec<u8> {
@@ -585,4 +612,116 @@ fn orderbook_wasm_numeric_cases() {
     assert_eq!(got, cases[2].2);
     let (u, got) = rows(&mut m, r#"{"rows":5,"group":1.0,"unit":"base"}"#, &eth("BTC"));
     assert_eq!((u.as_str(), got), ("BTC", cases[2].2.clone()));
+}
+
+// ------------------------------------------------ UTC-anchored CVD (opt-in)
+
+const MON: i64 = 1_794_787_200; // 2026-11-16 00:00 UTC, Monday
+const WEEK: i64 = 7 * 86_400;
+const ANCH: &str = "cvd_indicator_cvd_anchored.wasm";
+
+fn hist_p(r: &mut P, tf: &str, mode: Mode, from: usize, bars: &[InputBar], periods: Option<Vec<PeriodBaseline>>) -> Result<Output, PluginError> {
+    let b = serde_json::to_vec(&HistoryRequest { scope: scope_tf(mode, tf), revision: 1, output_from: from, bars: bars.to_vec(), periods }).unwrap();
+    r.call(OP_HISTORY, b)
+}
+fn hist_c(r: &mut P, tf: &str, mode: Mode, from: usize, bars: &[InputBar], canon_bars: &[InputBar]) -> Result<Output, PluginError> {
+    let p = period_refs(tf, mode, &bars[from..], canon(canon_bars));
+    hist_p(r, tf, mode, from, bars, Some(p))
+}
+fn cum(b: &InputBar, agg: bool) -> f64 {
+    if agg { b.ac } else { b.cvd_usdt }
+}
+
+#[test]
+fn plain_cvd_descriptor_is_unchanged_zero_context() {
+    let r = P::new("cvd_indicator_cvd.wasm", "{}").unwrap();
+    assert_eq!(r.d.context.max_bars(), 0);
+    assert!(r.d.context.periods.is_empty());
+    assert!(!String::from_utf8_lossy(&r.desc_json).contains("periods"), "plain descriptor has no periods key");
+    assert!(r.d.params.is_empty());
+    assert_eq!(
+        P::new("cvd_indicator_cvd.wasm", r#"{"anchor":"utc_day"}"#).err().unwrap().code,
+        codes::INVALID_PARAMS,
+        "plain cvd has no anchor param"
+    );
+}
+
+#[test]
+fn anchored_descriptor_declares_periods_zero_warmup() {
+    let r = P::new(ANCH, r#"{"anchor":"utc_week"}"#).unwrap();
+    assert_eq!(r.d.id, "cvd_anchored");
+    assert_eq!(r.d.context.periods, vec![PeriodKind::UtcDay, PeriodKind::UtcWeek]);
+    assert_eq!(r.d.context.max_bars(), 0, "no period-of-bars warm-up (1m week included)");
+}
+
+#[test]
+fn anchored_day_history_both_modes_value_zero_missing() {
+    let mut r = P::new(ANCH, r#"{"anchor":"utc_day"}"#).unwrap();
+    let day = continuous_bars(MON - 30 * 60, 60, 60);
+    for (mode, agg) in [(Mode::Source, false), (Mode::Aggregate, true)] {
+        let v = line(&hist_c(&mut r, "1m", mode, 0, &day, &day).unwrap(), "cvd");
+        assert!(v[..30].iter().all(Option::is_none), "Sunday boundary bar absent -> null");
+        for (j, x) in v.iter().enumerate().skip(30) {
+            assert_eq!(x.unwrap().to_bits(), (cum(&day[j], agg) - cum(&day[29], agg)).to_bits(), "j={j}");
+        }
+        assert!(v[30].unwrap() != 0.0);
+        for from in [0, 29, 30, 31, 59] {
+            assert_eq!(line(&hist_c(&mut r, "1m", mode, from, &day, &day).unwrap(), "cvd"), v[from..].to_vec(), "from={from}");
+        }
+        // Exact zero: cumulative exactly back at the boundary value.
+        let mut z = day.clone();
+        if agg { z[40].ac = day[29].ac } else { z[40].cvd_usdt = day[29].cvd_usdt }
+        let v = line(&hist_c(&mut r, "1m", mode, 30, &z, &z).unwrap(), "cvd");
+        assert_eq!(v[10].unwrap().to_bits(), 0, "exact +0.0 {mode:?}");
+    }
+    // Boundary bar missing in the canonical set -> whole Monday null (not 0,
+    // never seeded from 23:58).
+    let mut gap = day.clone();
+    gap.remove(29);
+    assert!(line(&hist_c(&mut r, "1m", Mode::Source, 0, &gap, &gap).unwrap(), "cvd").iter().all(Option::is_none));
+    // No references supplied / missing one / non-finite -> rejected, never nulls.
+    for p in [None, Some(vec![])] {
+        assert_eq!(hist_p(&mut r, "1m", Mode::Source, 0, &day, p).unwrap_err().code, codes::INVALID_INPUT);
+    }
+}
+
+#[test]
+fn anchored_week_late_sunday_1m_without_week_of_bars() {
+    let mut r = P::new(ANCH, r#"{"anchor":"utc_week"}"#).unwrap();
+    let late = continuous_bars(MON + WEEK - 30 * 60, 60, 40); // Sun 23:30 .. Mon 00:09
+    assert_eq!(late[29].time, MON + WEEK - 1);
+    let base = InputBar { time: MON - 1, cvd_usdt: 777_000.5, ac: -1_234_567.25, ..Default::default() };
+    let lk = |t: i64| if t == MON - 1 { Some(base.clone()) } else { canon(&late)(t) };
+    for (mode, agg) in [(Mode::Source, false), (Mode::Aggregate, true)] {
+        let p = period_refs("1m", mode, &late, lk);
+        let v = line(&hist_p(&mut r, "1m", mode, 0, &late, Some(p)).unwrap(), "cvd");
+        for j in 0..30 {
+            assert_eq!(v[j].unwrap().to_bits(), (cum(&late[j], agg) - cum(&base, agg)).to_bits(), "late Sunday j={j}");
+        }
+        for j in 30..40 {
+            assert_eq!(v[j].unwrap().to_bits(), (cum(&late[j], agg) - cum(&late[29], agg)).to_bits(), "next Monday reset j={j}");
+        }
+    }
+    let v = line(&hist_c(&mut r, "1m", Mode::Source, 0, &late, &late).unwrap(), "cvd");
+    assert!(v[..30].iter().all(Option::is_none) && v[30..].iter().all(Option::is_some), "unknown week ref -> null only for that week");
+}
+
+#[test]
+fn anchored_live_append_replace_reset() {
+    let mut r = P::new(ANCH, r#"{"anchor":"utc_day"}"#).unwrap();
+    let day = continuous_bars(MON - 30 * 60, 60, 60);
+    let refs = |b: &InputBar| Some(period_refs("1m", Mode::Source, std::slice::from_ref(b), canon(&day)));
+    let b = serde_json::to_vec(&LiveInit { scope: scope_tf(Mode::Source, "1m"), revision: 4, bars: day[..29].to_vec(), periods: refs(&day[28]) }).unwrap();
+    assert_eq!(line(&r.call(OP_LIVE_INIT, b).unwrap(), "cvd"), vec![None], "Sunday: ref absent");
+    let upd = |r: &mut P, seq: u64, op: LiveOp, bar: &InputBar| {
+        let b = serde_json::to_vec(&LiveUpdate { revision: 4, seq, ops: vec![op], periods: refs(bar) }).unwrap();
+        line(&r.call(OP_LIVE_UPDATE, b).unwrap(), "cvd")
+    };
+    assert_eq!(upd(&mut r, 1, LiveOp::Append { bar: day[29].clone() }, &day[29]), vec![None]);
+    assert_eq!(upd(&mut r, 2, LiveOp::Append { bar: day[30].clone() }, &day[30]), vec![Some(day[30].cvd_usdt - day[29].cvd_usdt)], "midnight reset");
+    let mut fix = day[30].clone();
+    fix.cvd_usdt += 5.0;
+    assert_eq!(upd(&mut r, 3, LiveOp::Replace { bar: fix.clone() }, &fix), vec![Some(fix.cvd_usdt - day[29].cvd_usdt)], "replace, not sum");
+    let b = serde_json::to_vec(&LiveUpdate { revision: 4, seq: 4, ops: vec![LiveOp::Append { bar: day[31].clone() }], periods: None }).unwrap();
+    assert_eq!(r.call(OP_LIVE_UPDATE, b).unwrap_err().code, codes::INVALID_INPUT, "update lacking refs rejected");
 }

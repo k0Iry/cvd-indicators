@@ -22,7 +22,7 @@ if [[ -n "${CVD_SDK_PATH:-}" ]]; then
 fi
 if [[ -n "${CVD_RELEASE_VERSION:-}" ]]; then PKG+=(--version "$CVD_RELEASE_VERSION"); fi
 echo "== native unit tests (algorithms)"
-cargo test "${CFG[@]}" --locked --release -p cvd-indicator-cvd -p cvd-indicator-flow -p cvd-indicator-orderbook -p cvd-indicator-example-range
+cargo test "${CFG[@]}" --locked --release -p cvd-indicator-cvd -p cvd-indicator-cvd-anchored -p cvd-indicator-flow -p cvd-indicator-orderbook -p cvd-indicator-example-range
 echo "== packaging-output safety + CI workflow policy (local)"
 cargo test "${CFG[@]}" --locked --release -p cvd-indicators-conformance --test dist_safety --test workflow_policy --test publish_dev
 echo "== package public allowlist (wasm-release, reproducible, manifest + SHA256SUMS)"

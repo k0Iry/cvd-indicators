@@ -24,7 +24,7 @@ impl Indicator for Cvd {
             name: "Cumulative Volume Delta (CVD)".into(),
             description: "Established cumulative taker quote delta from the host (projection, not recomputed)".into(),
             abi: abi::ABI_VERSION,
-            context: ContextSpec { bars: 0, per_tf: Default::default() },
+            context: ContextSpec { bars: 0, per_tf: Default::default(), periods: Vec::new() },
             params: vec![],
             inputs: vec![InputField::Cvd, InputField::AggregateCvd],
             outputs: vec![OutputSpec {
@@ -79,6 +79,7 @@ mod tests {
             params: Box::leak(Box::new(params.clone())),
             context_bars: 0,
             phase: ComputePhase::History,
+            periods: &[],
         }
     }
 
